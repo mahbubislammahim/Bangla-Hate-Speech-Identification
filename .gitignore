@@ -1,0 +1,7 @@
+# ignore files with labels
+*_with_labels.tsv
+
+__pycache__
+
+.DS_Store
+
