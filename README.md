@@ -36,6 +36,7 @@ __Table of contents:__
 - **23-14 December 2025:** Workshop co-located with IJCNLP-AACL 2025 (Mumbai, India)
 
 ## Recent Updates
+* __[11/07/2025]__  Release example scripts using DistilBERT model for subtask 1A and subtask 1B
 * __[10/07/2025]__  Development phase starts
 * __[10/07/2025]__  Training and dev data released
 
@@ -45,6 +46,8 @@ __Table of contents:__
   This directory contains data files for the task.
 * Main folder: [baselines](./baselines)<br/>
     Contains scripts provided for baseline models of the task.
+* Main folder: [example_scripts](./example_scripts)<br/>
+    Contains an example script provided to run DistilBERT model for subtask 1A and subtask 1B.
 * Main folder: [format_checker](./format_checker)<br/>
     Contains scripts provided to check the format of the submission file.
 * Main folder: [scorer](./scorer)<br/>
@@ -117,10 +120,16 @@ Where:
 490273	আওয়ামী লীগের সন্ত্রাসী কবে দরবেন এই সাহস আপনাদের নাই	"Political Hate"  "Little to None"  Organization
 ```
 
+## Example Fine-tuning Script
+
+We are pleased to release a set of example scripts to support participants in the Hate Speech Detection Shared Task. These scripts are designed to help you get started with data loading, preprocessing, and baseline model development for the three subtasks: subtask 1A, subtask 1B, and subtask 1C. We encourage you to use and adapt these examples to build and improve your own systems.
+The scripts are available in the shared task repository: [example_scripts](./example_scripts)
+
+
 ## Scorer and Official Evaluation Metrics
 
 ### Scorers
-The scorer for the task is located in the [scorer](scorer) module of the project. The scorer will report official evaluation metrics and other metrics of a prediction file. The scorer invokes the format checker for the task to verify the output is properly shaped. It also handles checking if the provided predictions file contains all tweets from the gold one.
+The scorer for the task is located in the [scorer](./scorer) module of the project. The scorer will report official evaluation metrics and other metrics of a prediction file. The scorer invokes the format checker for the task to verify the output is properly shaped. It also handles checking if the provided predictions file contains all tweets from the gold one.
 
 
 You can install all prerequisites through,
