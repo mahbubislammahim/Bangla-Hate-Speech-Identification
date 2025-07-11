@@ -75,7 +75,7 @@ def check_format(file_path):
     return True
 
 
-def validate_files(pred_files_path, subtask):
+def validate_files(pred_files_path):
     logging.info("Validating if passed files exist...")
 
     for pred_file_path in pred_files_path:
