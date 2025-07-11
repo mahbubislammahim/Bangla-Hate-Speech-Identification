@@ -247,8 +247,15 @@ Where:
 
 
 ### Submission Site
-[will update shortly](###)
 
+#### Subtask 1A
+**[https://www.codabench.org/competitions/9559/](https://www.codabench.org/competitions/9559/)**
+
+#### Subtask 1B
+**[https://www.codabench.org/competitions/9560/](https://www.codabench.org/competitions/9560/)**
+
+#### Subtask 1C
+**[https://www.codabench.org/competitions/9561/](https://www.codabench.org/competitions/9561/)**
 
 ## Citation
 There are various papers associated with the task. Details for the papers specific to the task as well as an overall overview will be posted here as they come out. Bib entries for each paper are included here.
