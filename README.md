@@ -27,10 +27,10 @@ __Table of contents:__
 
 ## Important Dates
 - **10 July 2025:** Registration on codalab and beginning of the development cycle
-- **25 September 2025:** Beginning of the evaluation cycle (test sets release and run submission)
-- **01 October 2025:** End of the evaluation cycle
-- **03 October 2025:** Publish rank list and share paper submission details
-- **15 October 2025:** Paper Submission Deadline (Shared Task System Papers Due)
+- **08 September 2025:** Beginning of the evaluation cycle (test sets release and run submission)
+- **15 September 2025:** End of the evaluation cycle
+- **17 September 2025:** Publish rank list and share paper submission details
+- **29 September 2025:** Paper Submission Deadline (Shared Task System Papers Due)
 - **03 November 2025:** Notification of acceptance
 - **11 November 2025:** Camera-ready due
 - **23-14 December 2025:** Workshop co-located with IJCNLP-AACL 2025 (Mumbai, India)
