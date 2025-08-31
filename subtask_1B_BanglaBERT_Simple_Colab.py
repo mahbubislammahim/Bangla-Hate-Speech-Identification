@@ -23,6 +23,7 @@ import evaluate
 import numpy as np
 from datasets import load_dataset, Dataset, DatasetDict
 import torch
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
 import transformers
 from transformers import (
@@ -537,6 +538,102 @@ print("✅ Continued training completed!")
 print(f"📊 Original Validation Accuracy: {metrics.get('eval_accuracy', 'N/A'):.4f}")
 print(f"📊 New Validation Accuracy: {continued_eval_metrics.get('eval_accuracy', 'N/A'):.4f}")
 print(f"📈 Improvement: {continued_eval_metrics.get('eval_accuracy', 0) - metrics.get('eval_accuracy', 0):.4f}")
+
+# ============================================================================
+# CELL 23: Generate Predictions with Continued Model
+# ============================================================================
+
+print("\n🔮 Generating predictions with continued model...")
+
+# Recreate predict_dataset for continued training (since it was modified earlier)
+continued_predict_dataset_original = raw_datasets["test"]
+if max_predict_samples is not None:
+    max_predict_samples_n = min(len(continued_predict_dataset_original), max_predict_samples)
+    continued_predict_dataset_original = continued_predict_dataset_original.select(range(max_predict_samples_n))
+
+# Use the continued trainer for predictions
+continued_ids = continued_predict_dataset_original['id']
+continued_predict_dataset = continued_predict_dataset_original.remove_columns("id")
+continued_predictions = continued_trainer.predict(continued_predict_dataset, metric_key_prefix="predict").predictions
+continued_predictions = np.argmax(continued_predictions, axis=1)
+
+# Save predictions from continued model
+continued_output_file = os.path.join(continued_training_args.output_dir, f"subtask_1B_banglabert_large_continued.tsv")
+
+if continued_trainer.is_world_process_zero():
+    with open(continued_output_file, "w") as writer:
+        logger.info(f"***** Continued model predict results *****")
+        writer.write("id\tlabel\tmodel\n")
+        for index, item in enumerate(continued_predictions):
+            item = label_list[item]
+            item = id2l[item]
+            writer.write(f"{continued_ids[index]}\t{item}\t{model_name}\n")
+
+print(f"✅ Continued model predictions saved to: {continued_output_file}")
+
+# ============================================================================
+# CELL 24: Official Scorer Evaluation for Continued Model
+# ============================================================================
+
+print("\n🏆 OFFICIAL SCORER EVALUATION for Continued Model:")
+print("=" * 50)
+
+# Get validation predictions from continued model
+continued_val_pred_results = continued_trainer.predict(eval_dataset, metric_key_prefix="eval")
+continued_val_predictions_raw = np.argmax(continued_val_pred_results.predictions, axis=1)
+
+# Prepare data in official scorer format
+continued_val_predictions = {}
+continued_val_gold_labels = {}
+
+# Get validation IDs and labels
+continued_val_df_original = pd.read_csv(validation_file, sep='\t')
+for idx, row in continued_val_df_original.iterrows():
+    doc_id = str(row['id'])
+    continued_val_predictions[doc_id] = id2l[continued_val_predictions_raw[idx]]
+    continued_val_gold_labels[doc_id] = str(row['label'])
+
+# Run EXACT official evaluation for continued model
+continued_acc, continued_precision, continued_recall, continued_f1 = evaluate_official(continued_val_predictions, continued_val_gold_labels, '1B')
+
+print(f"📊 CONTINUED MODEL OFFICIAL COMPETITION SCORES:")
+print(f"   Accuracy: {continued_acc:.4f}")
+print(f"   Precision: {continued_precision:.4f}")
+print(f"   Recall: {continued_recall:.4f}")
+print(f"   F1: {continued_f1:.4f}")
+
+print(f"\n📈 IMPROVEMENT COMPARISON:")
+print(f"   Original Accuracy: {acc:.4f}")
+print(f"   Continued Accuracy: {continued_acc:.4f}")
+print(f"   Accuracy Improvement: {continued_acc - acc:.4f}")
+
+print("\n🎯 These are the EXACT metrics for your continued model!")
+print("✅ Using identical functions from scorer/task.py")
+
+# ============================================================================
+# CELL 25: Upload Continued Model to Hugging Face Hub (Optional)
+# ============================================================================
+
+# Set your Hugging Face repository name for the continued model
+HF_REPO_NAME_CONTINUED = "Mahim47/banglabert-hatespeech-subtask1b-v2"  # Version 2
+
+print(f"\n🚀 Uploading continued model to Hugging Face Hub: {HF_REPO_NAME_CONTINUED}")
+
+# Push continued model and tokenizer (using the same model/tokenizer objects)
+model.push_to_hub(
+    HF_REPO_NAME_CONTINUED,
+    commit_message=f"Fine-tuned BanglaBERT v2 for hate speech detection (Subtask 1B) - Accuracy: {continued_eval_metrics.get('eval_accuracy', 'N/A'):.4f}",
+    private=False
+)
+
+tokenizer.push_to_hub(
+    HF_REPO_NAME_CONTINUED,
+    commit_message=f"Fine-tuned BanglaBERT v2 tokenizer for hate speech detection (Subtask 1B)",
+    private=False
+)
+
+print(f"✅ Continued model successfully uploaded to: https://huggingface.co/{HF_REPO_NAME_CONTINUED}")
+print("🎯 Your improved model is now available for others to use!")
 
 print("\n" + "="*50)
 print("🔄 TO CONTINUE TRAINING:")
