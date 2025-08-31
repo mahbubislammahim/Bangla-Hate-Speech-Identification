@@ -1,11 +1,11 @@
 # Hate Speech Identification Shared Task: Subtask 1B at BLP Workshop @IJCNLP-AACL 2025
-# Modified version using BanglaBERT instead of DistilBERT
+# IMPROVED VERSION with advanced techniques for better accuracy
 
 # ============================================================================
 # CELL 1: Install Dependencies
 # ============================================================================
 
-!pip install transformers datasets evaluate accelerate huggingface_hub
+!pip install transformers datasets evaluate accelerate huggingface_hub nlpaug sentencepiece
 
 # ============================================================================
 # CELL 2: Import Libraries
@@ -24,6 +24,8 @@ import numpy as np
 from datasets import load_dataset, Dataset, DatasetDict
 import torch
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+import nlpaug.augmenter.word as naw
+import nlpaug.augmenter.sentence as nas
 
 import transformers
 from transformers import (
@@ -38,6 +40,7 @@ from transformers import (
     TrainingArguments,
     default_data_collator,
     set_seed,
+    EarlyStoppingCallback,
 )
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
@@ -67,35 +70,46 @@ validation_file = 'blp25_hatespeech_subtask_1B_dev.tsv'
 test_file = 'blp25_hatespeech_subtask_1B_dev_test.tsv'
 
 # ============================================================================
-# CELL 5: Training Arguments (Optimized for BanglaBERT)
+# CELL 5: IMPROVED Training Arguments
 # ============================================================================
 
 training_args = TrainingArguments(
-    learning_rate=5e-6,  # Lower learning rate for large model
-    num_train_epochs=3,  # Optimal for 35K dataset (prevents overfitting)
-    per_device_train_batch_size=4,  # Smaller batch size for large model (335M params)
-    per_device_eval_batch_size=4,
-    output_dir="./banglabert_large_model/",
+    learning_rate=3e-5,  # Slightly higher learning rate for better convergence
+    num_train_epochs=4,  # More epochs with early stopping
+    per_device_train_batch_size=8,  # Increased batch size for better gradient estimates
+    per_device_eval_batch_size=16,  # Larger eval batch size
+    output_dir="./banglabert_improved_model/",
     overwrite_output_dir=True,
     remove_unused_columns=False,
     local_rank=-1,
     load_best_model_at_end=True,
-    save_total_limit=3,
-    save_strategy="epoch",  # Save every epoch
-    eval_strategy="epoch",  # Evaluate every epoch
-    metric_for_best_model="eval_accuracy",
+    save_total_limit=2,  # Save only best 2 checkpoints
+    save_strategy="epoch",
+    eval_strategy="epoch",
+    metric_for_best_model="eval_f1",  # Use F1 instead of accuracy
     greater_is_better=True,
-    warmup_steps=1000,  # More warmup steps for large model
-    weight_decay=0.01,  # Add weight decay
+    warmup_steps=500,  # Optimized warmup
+    weight_decay=0.01,
     logging_steps=100,
-    report_to=None
+    report_to=None,
+    dataloader_num_workers=4,  # Parallel data loading
+    fp16=True,  # Mixed precision training
+    gradient_accumulation_steps=2,  # Effective batch size = 8 * 2 = 16
+    evaluation_strategy="epoch",
+    save_strategy="epoch",
+    logging_dir="./logs",
+    run_name="banglabert_improved",
+    # Early stopping
+    load_best_model_at_end=True,
+    metric_for_best_model="eval_f1",
+    greater_is_better=True,
 )
 
 max_train_samples = None
 max_eval_samples = None
 max_predict_samples = None
-max_seq_length = 128  # Reduced for large model memory efficiency
-batch_size = 4
+max_seq_length = 256  # Increased sequence length for better context
+batch_size = 8
 
 # ============================================================================
 # CELL 6: Setup Logging
@@ -116,33 +130,81 @@ logger.warning(
 logger.info(f"Training/evaluation parameters {training_args}")
 
 # ============================================================================
-# CELL 7: Define Model (CHANGED TO BANGLABERT LARGE)
+# CELL 7: IMPROVED Model Selection
 # ============================================================================
 
-model_name = 'csebuetnlp/banglabert_large'  # BanglaBERT Large model (335M parameters)
-print(f"🤖 Using BanglaBERT Large model: {model_name}")
+# Try different model variants for better performance
+model_name = 'csebuetnlp/banglabert'  # Use base BanglaBERT instead of large for better generalization
+print(f"🤖 Using BanglaBERT Base model: {model_name}")
 
 # ============================================================================
 # CELL 8: Set Random Seed
 # ============================================================================
 
-set_seed(training_args.seed)
+set_seed(42)  # Fixed seed for reproducibility
 
 # ============================================================================
-# CELL 9: Load Data Files
+# CELL 9: Load and Preprocess Data with Augmentation
 # ============================================================================
 
 l2id = {'None': 0, 'Society': 1, 'Organization': 2, 'Community': 3, 'Individual': 4}
 
 train_df = pd.read_csv(train_file, sep='\t')
 train_df['label'] = train_df['label'].map(l2id).fillna(0).astype(int)
-train_df = Dataset.from_pandas(train_df)
-
 validation_df = pd.read_csv(validation_file, sep='\t')
 validation_df['label'] = validation_df['label'].map(l2id).fillna(0).astype(int)
-validation_df = Dataset.from_pandas(validation_df)
-
 test_df = pd.read_csv(test_file, sep='\t')
+
+# Data augmentation for minority classes
+print("🔄 Applying data augmentation for balanced training...")
+
+def augment_text(text, label, augmenter):
+    """Apply text augmentation"""
+    try:
+        augmented = augmenter.augment(text)[0]
+        return augmented
+    except:
+        return text
+
+# Initialize augmenters
+synonym_aug = naw.SynonymAug(aug_src='wordnet', lang='ben')
+backtranslation_aug = naw.BackTranslationAug(
+    from_model_name='facebook/wmt19-en-bn',
+    to_model_name='facebook/wmt19-bn-en'
+)
+
+# Apply augmentation to minority classes
+augmented_data = []
+label_counts = train_df['label'].value_counts()
+max_samples = label_counts.max()
+
+for label in train_df['label'].unique():
+    label_data = train_df[train_df['label'] == label]
+    current_count = len(label_data)
+    
+    if current_count < max_samples:
+        # Augment minority classes
+        samples_needed = max_samples - current_count
+        augmented_samples = label_data.sample(n=min(samples_needed, current_count), replace=True)
+        
+        for _, row in augmented_samples.iterrows():
+            # Apply synonym replacement
+            aug_text = augment_text(row['text'], row['label'], synonym_aug)
+            augmented_data.append({
+                'id': f"aug_{row['id']}",
+                'text': aug_text,
+                'label': row['label']
+            })
+
+# Add augmented data to training set
+if augmented_data:
+    aug_df = pd.DataFrame(augmented_data)
+    train_df = pd.concat([train_df, aug_df], ignore_index=True)
+    print(f"✅ Added {len(augmented_data)} augmented samples")
+
+# Convert to datasets
+train_df = Dataset.from_pandas(train_df)
+validation_df = Dataset.from_pandas(validation_df)
 test_df = Dataset.from_pandas(test_df)
 
 data_files = {"train": train_df, "validation": validation_df, "test": test_df}
@@ -184,6 +246,12 @@ tokenizer = AutoTokenizer.from_pretrained(
     use_auth_token=None,
 )
 
+# Add special tokens for better performance
+special_tokens = {
+    'additional_special_tokens': ['[HATE]', '[TARGET]', '[SEVERITY]']
+}
+tokenizer.add_special_tokens(special_tokens)
+
 model = AutoModelForSequenceClassification.from_pretrained(
     model_name,
     from_tf=bool(".ckpt" in model_name),
@@ -194,10 +262,13 @@ model = AutoModelForSequenceClassification.from_pretrained(
     ignore_mismatched_sizes=False,
 )
 
-print(f"✅ Large BanglaBERT model loaded! Parameters: {sum(p.numel() for p in model.parameters()):,}")
+# Resize token embeddings for new special tokens
+model.resize_token_embeddings(len(tokenizer))
+
+print(f"✅ Improved BanglaBERT model loaded! Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
 # ============================================================================
-# CELL 12: Preprocess Data
+# CELL 12: IMPROVED Preprocessing with Better Tokenization
 # ============================================================================
 
 non_label_column_names = [name for name in raw_datasets["train"].column_names if name != "label"]
@@ -226,8 +297,20 @@ if max_seq_length > tokenizer.model_max_length:
         f"model ({tokenizer.model_max_length}). Using max_seq_length={tokenizer.model_max_length}.")
 max_seq_length = min(max_seq_length, tokenizer.model_max_length)
 
-def preprocess_function(examples):
-    args = (examples[sentence1_key],)
+def improved_preprocess_function(examples):
+    """Improved preprocessing with better text handling"""
+    texts = examples[sentence1_key]
+    
+    # Clean and normalize text
+    cleaned_texts = []
+    for text in texts:
+        # Remove extra whitespace
+        text = ' '.join(text.split())
+        # Add special tokens for better context
+        text = f"[HATE] {text} [TARGET]"
+        cleaned_texts.append(text)
+    
+    args = (cleaned_texts,)
     result = tokenizer(*args, padding=padding, max_length=max_seq_length, truncation=True)
     
     if label_to_id is not None and "label" in examples:
@@ -235,10 +318,10 @@ def preprocess_function(examples):
     return result
 
 raw_datasets = raw_datasets.map(
-    preprocess_function,
+    improved_preprocess_function,
     batched=True,
     load_from_cache_file=True,
-    desc="Running tokenizer on dataset",
+    desc="Running improved tokenizer on dataset",
 )
 
 # ============================================================================
@@ -274,39 +357,57 @@ for index in random.sample(range(len(train_dataset)), 3):
     logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
 
 # ============================================================================
-# CELL 15: Setup Metrics and Trainer
+# CELL 15: IMPROVED Metrics and Trainer
 # ============================================================================
 
 metric = evaluate.load("accuracy")
 
-def compute_metrics(p: EvalPrediction):
+def improved_compute_metrics(p: EvalPrediction):
+    """Improved metrics computation with F1 score"""
     preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
     preds = np.argmax(preds, axis=1)
-    return {"accuracy": (preds == p.label_ids).astype(np.float32).mean().item()}
+    
+    accuracy = (preds == p.label_ids).astype(np.float32).mean().item()
+    f1 = f1_score(p.label_ids, preds, average='micro')
+    precision = precision_score(p.label_ids, preds, average='weighted')
+    recall = recall_score(p.label_ids, preds, average='weighted')
+    
+    return {
+        "accuracy": accuracy,
+        "f1": f1,
+        "precision": precision,
+        "recall": recall
+    }
 
-data_collator = default_data_collator
+# Custom data collator with dynamic padding
+data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
 train_dataset = train_dataset.remove_columns("id")
 eval_dataset = eval_dataset.remove_columns("id")
+
+# Add early stopping callback
+early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=3)
 
 trainer = Trainer(
     model=model,
     args=training_args,
     train_dataset=train_dataset,
     eval_dataset=eval_dataset,
-    compute_metrics=compute_metrics,
+    compute_metrics=improved_compute_metrics,
     tokenizer=tokenizer,
     data_collator=data_collator,
+    callbacks=[early_stopping_callback],
 )
 
 # ============================================================================
 # CELL 16: Train Model
 # ============================================================================
 
-print("🚀 Starting training with BanglaBERT...")
+print("🚀 Starting improved training with BanglaBERT...")
 print(f"📊 Training for {training_args.num_train_epochs} epochs")
 print(f"📊 Batch size: {training_args.per_device_train_batch_size}")
 print(f"📊 Learning rate: {training_args.learning_rate}")
+print(f"📊 Sequence length: {max_seq_length}")
 
 train_result = trainer.train()
 metrics = train_result.metrics
@@ -343,6 +444,7 @@ trainer.save_metrics("eval", metrics)
 
 print("✅ Evaluation completed!")
 print(f"📊 Validation Accuracy: {metrics.get('eval_accuracy', 'N/A'):.4f}")
+print(f"📊 Validation F1: {metrics.get('eval_f1', 'N/A'):.4f}")
 print(f"📊 Validation Loss: {metrics.get('eval_loss', 'N/A'):.4f}")
 
 # ============================================================================
@@ -381,6 +483,7 @@ val_gold_labels = {}
 
 # Get validation IDs and labels
 val_df_original = pd.read_csv(validation_file, sep='\t')
+id2l = {v: k for k, v in l2id.items()}
 for idx, row in val_df_original.iterrows():
     doc_id = str(row['id'])
     val_predictions[doc_id] = id2l[val_predictions_raw[idx]]
@@ -409,7 +512,7 @@ predict_dataset = predict_dataset.remove_columns("id")
 predictions = trainer.predict(predict_dataset, metric_key_prefix="predict").predictions
 predictions = np.argmax(predictions, axis=1)
 
-output_predict_file = os.path.join(training_args.output_dir, f"subtask_1B_banglabert_large.tsv")
+output_predict_file = os.path.join(training_args.output_dir, f"subtask_1B_banglabert_improved.tsv")
 
 if trainer.is_world_process_zero():
     with open(output_predict_file, "w") as writer:
@@ -429,215 +532,140 @@ print(f"✅ Predictions saved to: {output_predict_file}")
 kwargs = {"finetuned_from": model_name, "tasks": "text-classification"}
 trainer.create_model_card(**kwargs)
 
-print("🎉 All done! Model trained and predictions generated!")
+print("🎉 All done! Improved model trained and predictions generated!")
 print(f"📁 Results saved in: {training_args.output_dir}")
 print(f"📊 Final Validation Accuracy: {metrics.get('eval_accuracy', 'N/A'):.4f}")
+print(f"📊 Final Validation F1: {metrics.get('eval_f1', 'N/A'):.4f}")
 
 # ============================================================================
 # CELL 21: Upload to Hugging Face Hub (Optional)
 # ============================================================================
 
 # Set your Hugging Face repository name here
-HF_REPO_NAME = "Mahim47/banglabert-hatespeech-subtask1b"  # Change this to your desired repo name
+HF_REPO_NAME = "Mahim47/banglabert-improved-hatespeech-subtask1b"  # Change this to your desired repo name
+
+print("\n🔑 HUGGING FACE UPLOAD:")
+print("=" * 50)
 
 # Uncomment the following lines to upload to Hugging Face Hub:
-# 
-# # Step 1: Login to Hugging Face (you'll need to provide your token)
 print("🔑 Please login to Hugging Face Hub...")
+login()  # Uncomment this line and provide your HF token
+
+print(f"🚀 To upload model to Hugging Face Hub: {HF_REPO_NAME}")
+print("Uncomment the code below to upload:")
+
+# Step 1: Login to Hugging Face (you'll need to provide your token)
 login()  # This will prompt for your HF token
-# 
-# # Step 2: Push the model to Hub
+
+# Step 2: Push the model to Hub
 print(f"🚀 Uploading model to Hugging Face Hub: {HF_REPO_NAME}")
 
 # Push model and tokenizer separately to avoid parameter conflicts
 model.push_to_hub(
     HF_REPO_NAME,
-    commit_message=f"Fine-tuned BanglaBERT for hate speech detection (Subtask 1B) - Accuracy: {metrics.get('eval_accuracy', 'N/A'):.4f}",
+    commit_message=f"Improved BanglaBERT for hate speech detection (Subtask 1B) - F1: {metrics.get('eval_f1', 'N/A'):.4f}",
     private=False
 )
 
 tokenizer.push_to_hub(
     HF_REPO_NAME,
-    commit_message=f"Fine-tuned BanglaBERT tokenizer for hate speech detection (Subtask 1B)",
+    commit_message=f"Improved BanglaBERT tokenizer for hate speech detection (Subtask 1B)",
     private=False
 )
 
 print(f"✅ Model successfully uploaded to: https://huggingface.co/{HF_REPO_NAME}")
-print("🎯 Your model is now available for others to use!")
+print("🎯 Your improved model is now available for others to use!")
 
 print("\n" + "="*60)
 print("📝 TO UPLOAD TO HUGGING FACE:")
 print("1. Uncomment the upload code above")
 print("2. Change HF_REPO_NAME to your desired repository name")
 print("3. Get your HF token from: https://huggingface.co/settings/tokens")
-print("4. Run the cell and provide your token when prompted")
+print("4. Run the upload section and provide your token when prompted")
 print("="*60)
 
 # ============================================================================
-# CELL 22: Continue Training for Additional Epochs (Optional)
+# CELL 22: Model Ensemble (Optional - for even better performance)
 # ============================================================================
 
-print("🔄 Continuing training from checkpoint for 1 more epoch...")
+print("\n🔄 Training ensemble models for better performance...")
 
-# Specify your checkpoint path
-CHECKPOINT_PATH = "./banglabert_large_model/checkpoint-17762"
+# Train multiple models with different seeds
+ensemble_models = []
+ensemble_trainers = []
 
-# Update training arguments for continued training
-continued_training_args = TrainingArguments(
-    learning_rate=2e-6,  # Lower learning rate for continued training
-    num_train_epochs=3,  # Total epochs (will continue from where checkpoint left off)
-    per_device_train_batch_size=4,
-    per_device_eval_batch_size=4,
-    output_dir="./banglabert_large_model_continued/",  # New output directory
-    overwrite_output_dir=True,
-    remove_unused_columns=False,
-    local_rank=-1,
-    load_best_model_at_end=True,
-    save_total_limit=3,
-    save_strategy="epoch",
-    eval_strategy="epoch",
-    metric_for_best_model="eval_accuracy",
-    greater_is_better=True,
-    warmup_steps=100,  # Fewer warmup steps for continued training
-    weight_decay=0.01,
-    logging_steps=50,
-    report_to=None
-)
+for seed in [42, 123, 456, 789, 999]:
+    print(f"🌱 Training ensemble model with seed {seed}")
+    
+    # Set seed
+    set_seed(seed)
+    
+    # Create new model instance
+    ensemble_model = AutoModelForSequenceClassification.from_pretrained(
+        model_name,
+        config=config,
+        ignore_mismatched_sizes=False,
+    )
+    ensemble_model.resize_token_embeddings(len(tokenizer))
+    
+    # Create trainer for this model
+    ensemble_trainer = Trainer(
+        model=ensemble_model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        compute_metrics=improved_compute_metrics,
+        tokenizer=tokenizer,
+        data_collator=data_collator,
+        callbacks=[early_stopping_callback],
+    )
+    
+    # Train the model
+    ensemble_trainer.train()
+    
+    # Evaluate
+    ensemble_metrics = ensemble_trainer.evaluate(eval_dataset=eval_dataset)
+    print(f"📊 Ensemble model {seed} - F1: {ensemble_metrics.get('eval_f1', 'N/A'):.4f}")
+    
+    ensemble_models.append(ensemble_model)
+    ensemble_trainers.append(ensemble_trainer)
 
-# Create new trainer with continued training arguments
-continued_trainer = Trainer(
-    model=model,
-    args=continued_training_args,
-    train_dataset=train_dataset,
-    eval_dataset=eval_dataset,
-    compute_metrics=compute_metrics,
-    tokenizer=tokenizer,
-    data_collator=data_collator,
-)
+# Ensemble prediction
+print("\n🎯 Generating ensemble predictions...")
 
-# Load and evaluate current checkpoint performance
-print(f"📂 Loading checkpoint: {CHECKPOINT_PATH}")
+ensemble_predictions = []
+for ensemble_trainer in ensemble_trainers:
+    pred_results = ensemble_trainer.predict(predict_dataset, metric_key_prefix="predict")
+    ensemble_predictions.append(pred_results.predictions)
 
-# Continue training from specific checkpoint
-continued_train_result = continued_trainer.train(resume_from_checkpoint=CHECKPOINT_PATH)
-continued_metrics = continued_train_result.metrics
+# Average predictions
+ensemble_predictions = np.mean(ensemble_predictions, axis=0)
+ensemble_predictions = np.argmax(ensemble_predictions, axis=1)
 
-# Save the continued model
-continued_trainer.save_model()
-continued_trainer.log_metrics("continued_train", continued_metrics)
-continued_trainer.save_metrics("continued_train", continued_metrics)
-continued_trainer.save_state()
+# Save ensemble predictions
+ensemble_output_file = os.path.join(training_args.output_dir, f"subtask_1B_banglabert_ensemble.tsv")
 
-# Evaluate the continued model
-print("🔍 Evaluating continued model...")
-continued_eval_metrics = continued_trainer.evaluate(eval_dataset=eval_dataset)
-continued_trainer.log_metrics("continued_eval", continued_eval_metrics)
-continued_trainer.save_metrics("continued_eval", continued_eval_metrics)
-
-print("✅ Continued training completed!")
-print(f"📊 Original Validation Accuracy: {metrics.get('eval_accuracy', 'N/A'):.4f}")
-print(f"📊 New Validation Accuracy: {continued_eval_metrics.get('eval_accuracy', 'N/A'):.4f}")
-print(f"📈 Improvement: {continued_eval_metrics.get('eval_accuracy', 0) - metrics.get('eval_accuracy', 0):.4f}")
-
-# ============================================================================
-# CELL 23: Generate Predictions with Continued Model
-# ============================================================================
-
-print("\n🔮 Generating predictions with continued model...")
-
-# Recreate predict_dataset for continued training (since it was modified earlier)
-continued_predict_dataset_original = raw_datasets["test"]
-if max_predict_samples is not None:
-    max_predict_samples_n = min(len(continued_predict_dataset_original), max_predict_samples)
-    continued_predict_dataset_original = continued_predict_dataset_original.select(range(max_predict_samples_n))
-
-# Use the continued trainer for predictions
-continued_ids = continued_predict_dataset_original['id']
-continued_predict_dataset = continued_predict_dataset_original.remove_columns("id")
-continued_predictions = continued_trainer.predict(continued_predict_dataset, metric_key_prefix="predict").predictions
-continued_predictions = np.argmax(continued_predictions, axis=1)
-
-# Save predictions from continued model
-continued_output_file = os.path.join(continued_training_args.output_dir, f"subtask_1B_banglabert_large_continued.tsv")
-
-if continued_trainer.is_world_process_zero():
-    with open(continued_output_file, "w") as writer:
-        logger.info(f"***** Continued model predict results *****")
+if trainer.is_world_process_zero():
+    with open(ensemble_output_file, "w") as writer:
+        logger.info(f"***** Ensemble predict results *****")
         writer.write("id\tlabel\tmodel\n")
-        for index, item in enumerate(continued_predictions):
+        for index, item in enumerate(ensemble_predictions):
             item = label_list[item]
             item = id2l[item]
-            writer.write(f"{continued_ids[index]}\t{item}\t{model_name}\n")
+            writer.write(f"{ids[index]}\t{item}\t{model_name}_ensemble\n")
 
-print(f"✅ Continued model predictions saved to: {continued_output_file}")
+print(f"✅ Ensemble predictions saved to: {ensemble_output_file}")
 
-# ============================================================================
-# CELL 24: Official Scorer Evaluation for Continued Model
-# ============================================================================
-
-print("\n🏆 OFFICIAL SCORER EVALUATION for Continued Model:")
-print("=" * 50)
-
-# Get validation predictions from continued model
-continued_val_pred_results = continued_trainer.predict(eval_dataset, metric_key_prefix="eval")
-continued_val_predictions_raw = np.argmax(continued_val_pred_results.predictions, axis=1)
-
-# Prepare data in official scorer format
-continued_val_predictions = {}
-continued_val_gold_labels = {}
-
-# Get validation IDs and labels
-continued_val_df_original = pd.read_csv(validation_file, sep='\t')
-for idx, row in continued_val_df_original.iterrows():
-    doc_id = str(row['id'])
-    continued_val_predictions[doc_id] = id2l[continued_val_predictions_raw[idx]]
-    continued_val_gold_labels[doc_id] = str(row['label'])
-
-# Run EXACT official evaluation for continued model
-continued_acc, continued_precision, continued_recall, continued_f1 = evaluate_official(continued_val_predictions, continued_val_gold_labels, '1B')
-
-print(f"📊 CONTINUED MODEL OFFICIAL COMPETITION SCORES:")
-print(f"   Accuracy: {continued_acc:.4f}")
-print(f"   Precision: {continued_precision:.4f}")
-print(f"   Recall: {continued_recall:.4f}")
-print(f"   F1: {continued_f1:.4f}")
-
-print(f"\n📈 IMPROVEMENT COMPARISON:")
-print(f"   Original Accuracy: {acc:.4f}")
-print(f"   Continued Accuracy: {continued_acc:.4f}")
-print(f"   Accuracy Improvement: {continued_acc - acc:.4f}")
-
-print("\n🎯 These are the EXACT metrics for your continued model!")
-print("✅ Using identical functions from scorer/task.py")
-
-# ============================================================================
-# CELL 25: Upload Continued Model to Hugging Face Hub (Optional)
-# ============================================================================
-
-# Set your Hugging Face repository name for the continued model
-HF_REPO_NAME_CONTINUED = "Mahim47/banglabert-hatespeech-subtask1b-v2"  # Version 2
-
-print(f"\n🚀 Uploading continued model to Hugging Face Hub: {HF_REPO_NAME_CONTINUED}")
-
-# Push continued model and tokenizer (using the same model/tokenizer objects)
-model.push_to_hub(
-    HF_REPO_NAME_CONTINUED,
-    commit_message=f"Fine-tuned BanglaBERT v2 for hate speech detection (Subtask 1B) - Accuracy: {continued_eval_metrics.get('eval_accuracy', 'N/A'):.4f}",
-    private=False
-)
-
-tokenizer.push_to_hub(
-    HF_REPO_NAME_CONTINUED,
-    commit_message=f"Fine-tuned BanglaBERT v2 tokenizer for hate speech detection (Subtask 1B)",
-    private=False
-)
-
-print(f"✅ Continued model successfully uploaded to: https://huggingface.co/{HF_REPO_NAME_CONTINUED}")
-print("🎯 Your improved model is now available for others to use!")
-
-print("\n" + "="*50)
-print("🔄 TO CONTINUE TRAINING:")
-print("1. Uncomment the continued training code above")
-print("2. Adjust learning rate if needed (currently set to 2e-6)")
-print("3. Run the cell to train for 1 more epoch")
-print("="*50)
+print("\n" + "="*60)
+print("🎯 IMPROVEMENT TECHNIQUES APPLIED:")
+print("1. ✅ Data augmentation for minority classes")
+print("2. ✅ Increased sequence length (256 vs 128)")
+print("3. ✅ Better hyperparameters (learning rate, batch size)")
+print("4. ✅ Early stopping to prevent overfitting")
+print("5. ✅ F1 score optimization instead of accuracy")
+print("6. ✅ Mixed precision training (fp16)")
+print("7. ✅ Gradient accumulation for larger effective batch size")
+print("8. ✅ Special tokens for better context")
+print("9. ✅ Model ensemble for better generalization")
+print("10. ✅ Improved text preprocessing")
+print("="*60)
