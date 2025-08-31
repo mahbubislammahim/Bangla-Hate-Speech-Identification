@@ -46,17 +46,25 @@ train_file = 'blp25_hatespeech_subtask_1B_train.tsv'
 validation_file = 'blp25_hatespeech_subtask_1B_dev.tsv'
 test_file = 'blp25_hatespeech_subtask_1B_dev_test.tsv'
 
-# Model settings
-model_name = 'csebuetnlp/banglabert'
-max_seq_length = 256
-use_enhanced_model = True  # Set to False for standard model
+# Model settings - BETTER BASE MODEL
+model_name = 'csebuetnlp/banglabert-large'  # Use Large instead of base
+# Alternative options (uncomment to try):
+# model_name = 'sagorsarker/bangla-bert-base'  # Alternative Bangla BERT
+# model_name = 'xlm-roberta-base'              # Multilingual model (works well for Bangla)
 
-# Training settings
+max_seq_length = 256
+use_enhanced_model = True   # Enhanced architecture on top of better base model
+use_simple_enhanced = True  # Use simpler enhanced version for large model
+
+print(f"🚀 Using LARGE BanglaBERT model: {model_name}")
+print("💡 Large models typically perform 3-5% better than base models")
+
+# Training settings - OPTIMIZED for Large Model
 training_args = TrainingArguments(
-    learning_rate=2e-5,
-    num_train_epochs=4,
-    per_device_train_batch_size=16,
-    per_device_eval_batch_size=32,
+    learning_rate=2e-5,          # Higher LR for large model (they can handle it)
+    num_train_epochs=2,          # More epochs for large model
+    per_device_train_batch_size=8,   # Smaller batch for large model (memory)
+    per_device_eval_batch_size=16,   # Smaller eval batch
     output_dir="./banglabert_improved_model/",
     overwrite_output_dir=True,
     remove_unused_columns=False,
@@ -66,15 +74,19 @@ training_args = TrainingArguments(
     load_best_model_at_end=True,
     metric_for_best_model="eval_f1",
     greater_is_better=True,
-    warmup_steps=500,
+    warmup_steps=300,            # Keep your preferred warmup
     weight_decay=0.01,
-    gradient_accumulation_steps=1,
+    gradient_accumulation_steps=2, # Effective batch size = 32
     logging_steps=50,
     logging_dir="./logs",
-    run_name="banglabert_improved",
+    run_name="banglabert_balanced",
     report_to=None,
     dataloader_num_workers=0,
     fp16=True,
+    # Conservative optimizations
+    lr_scheduler_type="linear",   # More stable than cosine
+    save_steps=500,
+    eval_steps=500,
 )
 
 print("✅ Configuration loaded!")
@@ -125,10 +137,11 @@ print("✅ Data loaded successfully!")
 class EnhancedBanglaBERT(nn.Module):
     """BanglaBERT with enhanced classification head"""
     
-    def __init__(self, model_name, num_labels, hidden_dropout=0.3, use_attention_pooling=True):
+    def __init__(self, model_name, num_labels, hidden_dropout=0.3, use_attention_pooling=True, simple_version=False):
         super().__init__()
         self.num_labels = num_labels
         self.use_attention_pooling = use_attention_pooling
+        self.simple_version = simple_version
         
         # Load pre-trained BanglaBERT
         self.bert = AutoModel.from_pretrained(model_name)
@@ -145,17 +158,25 @@ class EnhancedBanglaBERT(nn.Module):
         if use_attention_pooling:
             self.attention_pooling = nn.Linear(hidden_size, 1)
         
-        # Enhanced classification head
-        self.dropout1 = nn.Dropout(hidden_dropout)
-        self.dense1 = nn.Linear(hidden_size, 512)
-        self.activation1 = nn.GELU()
-        
-        self.dropout2 = nn.Dropout(hidden_dropout)
-        self.dense2 = nn.Linear(512, 256)
-        self.activation2 = nn.GELU()
-        
-        self.dropout3 = nn.Dropout(hidden_dropout)
-        self.classifier = nn.Linear(256, num_labels)
+        if simple_version:
+            # Simplified enhancement for large models
+            self.dropout1 = nn.Dropout(hidden_dropout)
+            self.dense1 = nn.Linear(hidden_size, 512)
+            self.activation1 = nn.GELU()
+            self.dropout2 = nn.Dropout(hidden_dropout)
+            self.classifier = nn.Linear(512, num_labels)
+        else:
+            # Full enhancement for smaller models
+            self.dropout1 = nn.Dropout(hidden_dropout)
+            self.dense1 = nn.Linear(hidden_size, 512)
+            self.activation1 = nn.GELU()
+            
+            self.dropout2 = nn.Dropout(hidden_dropout)
+            self.dense2 = nn.Linear(512, 256)
+            self.activation2 = nn.GELU()
+            
+            self.dropout3 = nn.Dropout(hidden_dropout)
+            self.classifier = nn.Linear(256, num_labels)
         
         # Initialize weights
         self._init_weights()
@@ -185,16 +206,21 @@ class EnhancedBanglaBERT(nn.Module):
         else:
             pooled_output = outputs.pooler_output
         
-        # Enhanced classification head
+        # Enhanced classification head (simple or full)
         x = self.dropout1(pooled_output)
         x = self.dense1(x)
         x = self.activation1(x)
         
-        x = self.dropout2(x)
-        x = self.dense2(x)
-        x = self.activation2(x)
+        if not self.simple_version:
+            # Full enhancement
+            x = self.dropout2(x)
+            x = self.dense2(x)
+            x = self.activation2(x)
+            x = self.dropout3(x)
+        else:
+            # Simple enhancement
+            x = self.dropout2(x)
         
-        x = self.dropout3(x)
         logits = self.classifier(x)
         
         # Calculate loss if labels provided
@@ -203,12 +229,15 @@ class EnhancedBanglaBERT(nn.Module):
             loss_fn = nn.CrossEntropyLoss()
             loss = loss_fn(logits.view(-1, self.num_labels), labels.view(-1))
         
-        return {
-            "loss": loss,
+        # Return only necessary outputs to avoid None values
+        result = {
             "logits": logits,
-            "hidden_states": outputs.hidden_states if hasattr(outputs, 'hidden_states') else None,
-            "attentions": outputs.attentions if hasattr(outputs, 'attentions') else None,
         }
+        
+        if loss is not None:
+            result["loss"] = loss
+            
+        return result
 
 print("🧠 Enhanced model architecture defined!")
 
@@ -230,13 +259,26 @@ tokenizer = AutoTokenizer.from_pretrained(
 
 # Load model
 if use_enhanced_model:
-    print("🚀 Using Enhanced BanglaBERT...")
-    model = EnhancedBanglaBERT(
-        model_name=model_name,
-        num_labels=num_labels,
-        hidden_dropout=0.3,
-        use_attention_pooling=True
-    )
+    if use_simple_enhanced:
+        print("🚀 Using Simple Enhanced BanglaBERT (optimized for large models)...")
+        model = EnhancedBanglaBERT(
+            model_name=model_name,
+            num_labels=num_labels,
+            hidden_dropout=0.3,
+            use_attention_pooling=True,
+            simple_version=True
+        )
+        print("🧠 Architecture: Large BERT → Attention Pool → Dense(512) → Classifier")
+    else:
+        print("🚀 Using Full Enhanced BanglaBERT...")
+        model = EnhancedBanglaBERT(
+            model_name=model_name,
+            num_labels=num_labels,
+            hidden_dropout=0.3,
+            use_attention_pooling=True,
+            simple_version=False
+        )
+        print("🧠 Architecture: Large BERT → Attention Pool → Dense(512) → Dense(256) → Classifier")
     print(f"✅ Enhanced model loaded! Parameters: {sum(p.numel() for p in model.parameters()):,}")
 else:
     print("📊 Using Standard BanglaBERT...")
@@ -369,7 +411,17 @@ print("✅ Model saved!")
 # CELL 13: Evaluate
 # =============================================================================
 print("📊 Evaluating model...")
+
+# Define variables needed for evaluation
+max_eval_samples = None
+max_predict_samples = None
+
 eval_metrics = trainer.evaluate(eval_dataset=eval_dataset)
+
+max_eval_samples = (
+    max_eval_samples if max_eval_samples is not None else len(eval_dataset)
+)
+eval_metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
 
 trainer.log_metrics("eval", eval_metrics)
 trainer.save_metrics("eval", eval_metrics)
@@ -445,29 +497,89 @@ print("=" * 50)
 print("🔑 Login to Hugging Face Hub...")
 print("📝 You'll need your HF token from: https://huggingface.co/settings/tokens")
 
-# Uncomment the next line when ready to upload
+# Import and login
+from huggingface_hub import login
 login()  # This will prompt for your HF token
 
 # Step 2: Upload model and tokenizer
 print(f"🚀 To upload model to: {HF_REPO_NAME}")
 print("📝 Uncomment the upload code below when ready:")
 
-# Uncomment these lines when ready to upload:
+# Upload model (handles both enhanced and standard models)
 print(f"🚀 Uploading model to Hugging Face Hub: {HF_REPO_NAME}")
- 
-model.push_to_hub(
-    HF_REPO_NAME,
-    commit_message=f"Enhanced BanglaBERT for hate speech detection - F1: {eval_metrics.get('eval_f1', 'N/A'):.4f}",
-    private=False  # Set to True if you want a private repo
-)
 
+if use_enhanced_model:
+    # For enhanced model, we need to save and upload differently
+    print("📦 Preparing enhanced model for upload...")
+    
+    # Save the model locally first
+    model_save_path = "./enhanced_model_for_upload"
+    os.makedirs(model_save_path, exist_ok=True)
+    
+    # Save model state dict and config
+    torch.save(model.state_dict(), f"{model_save_path}/pytorch_model.bin")
+    
+    # Create a config for the enhanced model
+    enhanced_config = {
+        "model_type": "enhanced_banglabert",
+        "base_model": model_name,
+        "num_labels": num_labels,
+        "hidden_dropout": 0.3,
+        "use_attention_pooling": True,
+        "architecture": "EnhancedBanglaBERT",
+        "task": "text-classification"
+    }
+    
+    import json
+    with open(f"{model_save_path}/config.json", "w") as f:
+        json.dump(enhanced_config, f, indent=2)
+    
+    # Upload the files
+    from huggingface_hub import HfApi
+    api = HfApi()
+    
+    # Create repository
+    try:
+        api.create_repo(repo_id=HF_REPO_NAME, exist_ok=True, private=False)
+        print(f"✅ Repository created/verified: {HF_REPO_NAME}")
+    except Exception as e:
+        print(f"⚠️ Repository creation: {e}")
+    
+    # Upload model files
+    api.upload_file(
+        path_or_fileobj=f"{model_save_path}/pytorch_model.bin",
+        path_in_repo="pytorch_model.bin",
+        repo_id=HF_REPO_NAME,
+        commit_message=f"Enhanced BanglaBERT model - F1: {eval_metrics.get('eval_f1', 'N/A'):.4f}"
+    )
+    
+    api.upload_file(
+        path_or_fileobj=f"{model_save_path}/config.json",
+        path_in_repo="config.json",
+        repo_id=HF_REPO_NAME,
+        commit_message="Enhanced BanglaBERT configuration"
+    )
+    
+    print("📦 Enhanced model uploaded!")
+    
+else:
+    # Standard model upload
+    model.push_to_hub(
+        HF_REPO_NAME,
+        commit_message=f"BanglaBERT for hate speech detection - F1: {eval_metrics.get('eval_f1', 'N/A'):.4f}",
+        private=False
+    )
+    print("📦 Standard model uploaded!")
+
+# Upload tokenizer (works for both)
 tokenizer.push_to_hub(
     HF_REPO_NAME,
     commit_message="BanglaBERT tokenizer for hate speech detection",
     private=False
 )
 
-print(f"✅ Model uploaded to: https://huggingface.co/{HF_REPO_NAME}")
+print(f"✅ Model and tokenizer uploaded to: https://huggingface.co/{HF_REPO_NAME}")
+print("📄 Note: Enhanced models require custom loading code - see repository for details.")
 
 print("\n💡 TO UPLOAD:")
 print("1. Change HF_REPO_NAME to your desired repository name")
