@@ -5,7 +5,7 @@
 # CELL 1: Install Dependencies
 # ============================================================================
 
-!pip install transformers datasets evaluate accelerate huggingface_hub sentencepiece
+#pip install transformers datasets evaluate accelerate huggingface_hub sentencepiece
 
 # ============================================================================
 # CELL 2: Import Libraries
@@ -24,6 +24,8 @@ import numpy as np
 from datasets import load_dataset, Dataset, DatasetDict
 import torch
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from transformers.modeling_outputs import SequenceClassifierOutput
+
 # Removed nlpaug imports - using simpler data balancing approach
 
 import transformers
@@ -250,13 +252,13 @@ class EnhancedBanglaBERT(nn.Module):
             if isinstance(module, nn.Linear):
                 module.weight.data.normal_(mean=0.0, std=0.02)
                 if module.bias is not None:
-                    module.bias.data.zero_()
+                    module.bias.data.zero_() 
     
     def forward(self, input_ids, attention_mask=None, labels=None, **kwargs):
         # Get BERT outputs
         outputs = self.bert(
             input_ids=input_ids,
-            attention_mask=attention_mask,
+            attention_mask=attention_mask if attention_mask is not None else torch.ones(input_ids.size(), device=input_ids.device),
             output_hidden_states=True,
             return_dict=True
         )
@@ -291,12 +293,12 @@ class EnhancedBanglaBERT(nn.Module):
             loss_fn = nn.CrossEntropyLoss()
             loss = loss_fn(logits.view(-1, self.num_labels), labels.view(-1))
         
-        return {
-            "loss": loss,
-            "logits": logits,
-            "hidden_states": outputs.hidden_states if hasattr(outputs, 'hidden_states') else None,
-            "attentions": outputs.attentions if hasattr(outputs, 'attentions') else None,
-        }
+        return SequenceClassifierOutput(
+        loss=loss,
+        logits=logits,
+        hidden_states=outputs.hidden_states,
+        attentions=outputs.attentions,
+        )
 
 print("🧠 Enhanced BanglaBERT model class defined!")
 
