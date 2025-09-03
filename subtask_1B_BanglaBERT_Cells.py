@@ -13,10 +13,13 @@ import logging
 import os
 import random
 import sys
+import unicodedata
 import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from datasets import Dataset, DatasetDict
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import transformers
@@ -30,6 +33,9 @@ from transformers import (
 # =============================================================================
 os.environ["WANDB_DISABLED"] = "true"
 set_seed(42)
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.benchmark = True
 
 # Setup logging
 logging.basicConfig(
@@ -59,27 +65,34 @@ print("💡 Large models typically perform 3-5% better than base models")
 # Training settings - OPTIMIZED for Large Model
 training_args = TrainingArguments(
     learning_rate=2e-5,          
-    num_train_epochs=3,          
+    num_train_epochs=5,          
     per_device_train_batch_size=16, 
     per_device_eval_batch_size=16,  
     output_dir="./banglabert_improved_model/",
     overwrite_output_dir=True,
     remove_unused_columns=False,
     save_strategy="epoch",
-    eval_strategy="epoch",
+    evaluation_strategy="epoch",
     save_total_limit=2,
     load_best_model_at_end=True,
     metric_for_best_model="eval_f1",
     greater_is_better=True,
-    warmup_steps=300,        
+    warmup_ratio=0.06,        
     weight_decay=0.01,
     gradient_accumulation_steps=2,
     logging_steps=50,
     logging_dir="./logs",
     run_name="banglabert_balanced",
     report_to=None,
-    dataloader_num_workers=0,
-    fp16=True,
+    dataloader_num_workers=2,
+    fp16=False,
+    bf16=True,
+    gradient_checkpointing=True,
+    label_smoothing_factor=0.05,
+    group_by_length=True,
+    eval_accumulation_steps=2,
+    optim="adamw_torch_fused",
+    max_grad_norm=0.5,
     # Conservative optimizations
     lr_scheduler_type="linear",   # More stable than cosine
     save_steps=500,
@@ -95,10 +108,20 @@ l2id = {'None': 0, 'Society': 1, 'Organization': 2, 'Community': 3, 'Individual'
 # Load datasets
 print(f"📊 Loading datasets...")
 train_df = pd.read_csv(train_file, sep='\t')
-train_df['label'] = train_df['label'].map(l2id).fillna(0).astype(int)
+mapped = train_df['label'].map(l2id)
+unknown_train = mapped.isna().sum()
+if unknown_train > 0:
+    print(f"⚠️  {unknown_train} unknown train labels mapped to 'None'.")
+mapped = mapped.fillna(l2id['None'])
+train_df['label'] = mapped.astype(int)
 
 validation_df = pd.read_csv(validation_file, sep='\t')
-validation_df['label'] = validation_df['label'].map(l2id).fillna(0).astype(int)
+mapped_val = validation_df['label'].map(l2id)
+unknown_val = mapped_val.isna().sum()
+if unknown_val > 0:
+    print(f"⚠️  {unknown_val} unknown val labels mapped to 'None'.")
+mapped_val = mapped_val.fillna(l2id['None'])
+validation_df['label'] = mapped_val.astype(int)
 
 test_df = pd.read_csv(test_file, sep='\t')
 
@@ -119,7 +142,7 @@ oversampling_weights = majority_class_count / label_counts
 # This step ensures the scale of the weights is manageable
 oversampling_weights = oversampling_weights / oversampling_weights.sum() * len(label_counts)
 
-class_weights = torch.tensor(oversampling_weights.values, dtype=torch.float).to("cuda")
+class_weights = torch.tensor(oversampling_weights.values, dtype=torch.float)
 print("Class weights with oversampling:")
 print(class_weights)
 
@@ -145,6 +168,66 @@ print("✅ Data loaded successfully!")
 
 # CELL 6: Enhanced Model Architecture
 # =============================================================================
+class FocalLoss(nn.Module):
+    """Focal Loss for multi-class classification.
+
+    Args:
+        gamma (float): focusing parameter; larger values focus more on hard examples.
+        alpha (Tensor|List|None): class weights (optional). Shape [num_classes].
+        reduction (str): 'mean' | 'sum' | 'none'.
+        label_smoothing (float): label smoothing factor in [0, 1). Applied before focal modulation.
+    """
+    def __init__(self, gamma: float = 2.0, alpha=None, reduction: str = 'mean', label_smoothing: float = 0.0):
+        super().__init__()
+        self.gamma = gamma
+        self.reduction = reduction
+        self.label_smoothing = label_smoothing
+
+        if alpha is None:
+            self.register_buffer('alpha', None)
+        else:
+            alpha_tensor = torch.as_tensor(alpha, dtype=torch.float)
+            self.register_buffer('alpha', alpha_tensor)
+
+    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        num_classes = logits.size(-1)
+        log_probs = F.log_softmax(logits, dim=-1)
+        probs = log_probs.exp()
+
+        # One-hot targets with optional label smoothing
+        with torch.no_grad():
+            true_dist = torch.zeros_like(log_probs)
+            true_dist.scatter_(1, target.unsqueeze(1), 1.0)
+            if self.label_smoothing > 0.0:
+                true_dist = true_dist * (1.0 - self.label_smoothing) + self.label_smoothing / num_classes
+
+        # Compute focal modulation
+        pt = (true_dist * probs).sum(dim=-1)
+        focal_factor = (1.0 - pt).clamp(min=1e-6).pow(self.gamma)
+
+        # Weighted negative log-likelihood
+        nll = -(true_dist * log_probs).sum(dim=-1)
+
+        if self.alpha is not None:
+            alpha_weight = self.alpha[target]
+            loss = alpha_weight * focal_factor * nll
+        else:
+            loss = focal_factor * nll
+
+        if self.reduction == 'mean':
+            return loss.mean()
+        if self.reduction == 'sum':
+            return loss.sum()
+        return loss
+
+def create_focal_loss(class_weights: torch.Tensor = None, gamma: float = 2.0, label_smoothing: float = 0.0) -> FocalLoss:
+    """Helper to build FocalLoss with optional class weights and smoothing.
+
+    Note: This only constructs the loss; do not call here. Use later in training.
+    """
+    alpha = class_weights if class_weights is not None else None
+    return FocalLoss(gamma=gamma, alpha=alpha, reduction='mean', label_smoothing=label_smoothing)
+
 class EnhancedBanglaBERT(nn.Module):
     """BanglaBERT with enhanced classification head"""
     
@@ -163,7 +246,8 @@ class EnhancedBanglaBERT(nn.Module):
         self.config.id2label = {i: f"LABEL_{i}" for i in range(num_labels)}
         
         if class_weights is not None:
-            self.class_weights = class_weights
+            # Keep with model and move across devices automatically
+            self.register_buffer("class_weights", class_weights)
         
         hidden_size = self.bert.config.hidden_size
         
@@ -171,7 +255,6 @@ class EnhancedBanglaBERT(nn.Module):
         if use_attention_pooling:
             self.attention_pooling = nn.Linear(hidden_size, 1)
         
-        # Full enhancement for smaller models
         self.dropout1 = nn.Dropout(hidden_dropout)
         self.dense1 = nn.Linear(hidden_size, 512)
         self.activation1 = nn.GELU()
@@ -220,8 +303,20 @@ class EnhancedBanglaBERT(nn.Module):
             weights = getattr(self, 'class_weights', None)
             if weights is None:
                 weights = torch.ones(self.num_labels).to(logits.device)
-            loss_fn = nn.CrossEntropyLoss(weight=weights)
+            # Default: class-weighted CrossEntropy with mild smoothing
+            loss_fn = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.05)
             loss = loss_fn(logits.view(-1, self.num_labels), labels.view(-1))
+
+            # --- FocalLoss alternative (commented out) ---
+            # If you want to use FocalLoss instead of CrossEntropyLoss, uncomment below:
+            # if not hasattr(self, 'focal_loss'):
+            #     self.focal_loss = create_focal_loss(
+            #         class_weights=weights,
+            #         gamma=2.0,
+            #         label_smoothing=0.02,
+            #     )
+            # loss = self.focal_loss(logits, labels)
+            # -------------------------------------------
         
         # Return only necessary outputs to avoid None values
         result = {
@@ -267,7 +362,8 @@ if use_enhanced_model:
         model_name=model_name,
         num_labels=num_labels,
         hidden_dropout=0.3,
-        use_attention_pooling=True
+        use_attention_pooling=True,
+        class_weights=class_weights,
     )
     print("🧠 Architecture: Large BERT → Attention Pool → Dense(512) → Classifier")
     print(f"✅ Enhanced model loaded! Parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -291,14 +387,17 @@ def preprocess_function(examples):
         if isinstance(text, list):
             text = ' '.join(str(t) for t in text)
         text = str(text)
-        text = ' '.join(text.split())
+        # Normalize unicode and common Bangla artifacts
+        text = unicodedata.normalize('NFC', text)
+        text = text.replace('\u200c', '').replace('\u200d', '')  # zero-width non/joiners
         text = text.replace('@', '').replace('http', '').replace('www', '')
+        text = ' '.join(text.split())
         cleaned_texts.append(text)
     
     # Tokenize
     result = tokenizer(
         cleaned_texts,
-        padding="max_length",
+        padding=False,
         max_length=max_seq_length,
         truncation=True,
         return_tensors=None
@@ -333,9 +432,10 @@ eval_dataset = raw_datasets["validation"]
 predict_dataset = raw_datasets["test"]
 
 # Remove id column if exists
-for dataset in [train_dataset, eval_dataset]:
-    if "id" in dataset.column_names:
-        dataset = dataset.remove_columns("id")
+if "id" in train_dataset.column_names:
+    train_dataset = train_dataset.remove_columns("id")
+if "id" in eval_dataset.column_names:
+    eval_dataset = eval_dataset.remove_columns("id")
 
 # Metrics function
 def compute_metrics(p: EvalPrediction):
@@ -343,7 +443,9 @@ def compute_metrics(p: EvalPrediction):
     preds = np.argmax(preds, axis=1)
     
     accuracy = (preds == p.label_ids).astype(np.float32).mean().item()
-    f1 = f1_score(p.label_ids, preds, average='micro')
+    f1_macro = f1_score(p.label_ids, preds, average='macro', zero_division=0)
+    f1_micro = f1_score(p.label_ids, preds, average='micro', zero_division=0)
+    f1_weighted = f1_score(p.label_ids, preds, average='weighted', zero_division=0)
     precision = precision_score(p.label_ids, preds, average='weighted', zero_division=0)
     recall = recall_score(p.label_ids, preds, average='weighted', zero_division=0)
     
@@ -359,22 +461,53 @@ def compute_metrics(p: EvalPrediction):
     
     return {
         "accuracy": accuracy,
-        "f1": f1,
+        "f1": f1_macro,
+        "f1_micro": f1_micro,
+        "f1_weighted": f1_weighted,
         "precision": precision,
         "recall": recall
     }
 
-# Data collator
-data_collator = default_data_collator
+# Data collator - dynamic padding
+data_collator = DataCollatorWithPadding(tokenizer=tokenizer, pad_to_multiple_of=8)
 
 # Early stopping
-early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=3)
+early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=3, early_stopping_threshold=0.0005)
 
 print("✅ Training preparation complete!")
 
 # CELL 10: Initialize Trainer
 # =============================================================================
-trainer = Trainer(
+class CustomTrainer(Trainer):
+    """Trainer with WeightedRandomSampler for class imbalance"""
+    def get_train_dataloader(self):
+        if self.train_dataset is None:
+            raise ValueError("Trainer: training requires a train_dataset")
+
+        labels = self.train_dataset["label"]
+        labels = np.array(labels)
+        class_counts = np.bincount(labels, minlength=num_labels)
+        # Avoid division by zero
+        class_counts[class_counts == 0] = 1
+        sample_weights = 1.0 / class_counts[labels]
+        sample_weights = torch.from_numpy(sample_weights).float()
+
+        sampler = WeightedRandomSampler(weights=sample_weights,
+                                        num_samples=len(sample_weights),
+                                        replacement=True)
+
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.args.train_batch_size,
+            sampler=sampler,
+            collate_fn=self.data_collator,
+            drop_last=self.args.dataloader_drop_last,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=True,
+            persistent_workers=True if self.args.dataloader_num_workers > 0 else False,
+        )
+
+trainer = CustomTrainer(
     model=model,
     args=training_args,
     train_dataset=train_dataset,
@@ -471,7 +604,7 @@ def apply_tta(trainer, dataset, num_augmentations=5):
     return np.argmax(avg_predictions, axis=1)
 
 print("🎯 Applying Test Time Augmentation...")
-tta_predictions = apply_tta(trainer, predict_dataset_clean, num_augmentations=5)
+tta_predictions = apply_tta(trainer, predict_dataset_clean, num_augmentations=10)
 
 # Save TTA predictions
 tta_output_file = os.path.join(training_args.output_dir, "subtask_1B_tta_predictions.tsv")

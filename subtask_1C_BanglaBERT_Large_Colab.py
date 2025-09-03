@@ -6,7 +6,7 @@
 # CELL 1: Install Dependencies
 # ============================================================================
 
-!pip install transformers datasets evaluate accelerate scikit-learn
+#pip install transformers datasets evaluate accelerate scikit-learn
 
 # ============================================================================
 # CELL 2: Import Libraries
@@ -24,7 +24,7 @@ import evaluate
 import numpy as np
 from datasets import load_dataset, Dataset, DatasetDict
 import torch
-from sklearn.metrics import accuracy_score, f1_score, classification_report
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, classification_report
 
 import transformers
 from transformers import (
@@ -82,7 +82,7 @@ training_args = TrainingArguments(
     load_best_model_at_end=True,
     save_total_limit=3,
     save_strategy="epoch",  # Save every epoch
-    eval_strategy="epoch",  # Evaluate every epoch
+    evaluation_strategy="epoch",  # Evaluate every epoch
     metric_for_best_model="eval_accuracy",
     greater_is_better=True,
     warmup_steps=1000,  # More warmup steps for large model
@@ -297,7 +297,8 @@ print(f"✅ BanglaBERT Large model loaded! Parameters: {sum(p.numel() for p in m
 
 non_label_column_names = [name for name in raw_datasets["train"].column_names 
                          if name not in ["hate_type", "hate_severity", "to_whom"]]
-sentence1_key = non_label_column_names[1]  # text column
+# Prefer 'text' if available; otherwise fall back to first non-label column
+sentence1_key = "text" if "text" in raw_datasets["train"].column_names else non_label_column_names[0]
 
 padding = "max_length"
 
@@ -382,9 +383,9 @@ def compute_metrics(p: EvalPrediction):
     to_whom_acc = accuracy_score(to_whom_labels, to_whom_preds)
     
     # Calculate F1 scores
-    hate_type_f1 = f1_score(hate_type_labels, hate_type_preds, average='macro')
-    hate_severity_f1 = f1_score(hate_severity_labels, hate_severity_preds, average='macro')
-    to_whom_f1 = f1_score(to_whom_labels, to_whom_preds, average='macro')
+    hate_type_f1 = f1_score(hate_type_labels, hate_type_preds, average='macro', zero_division=0)
+    hate_severity_f1 = f1_score(hate_severity_labels, hate_severity_preds, average='macro', zero_division=0)
+    to_whom_f1 = f1_score(to_whom_labels, to_whom_preds, average='macro', zero_division=0)
     
     # Overall accuracy (all three tasks correct)
     overall_acc = np.mean((hate_type_preds == hate_type_labels) & 
@@ -421,8 +422,10 @@ class MultiLabelDataCollator:
 
 data_collator = MultiLabelDataCollator(tokenizer)
 
-train_dataset = train_dataset.remove_columns("id")
-eval_dataset = eval_dataset.remove_columns("id")
+if "id" in train_dataset.column_names:
+    train_dataset = train_dataset.remove_columns("id")
+if "id" in eval_dataset.column_names:
+    eval_dataset = eval_dataset.remove_columns("id")
 
 # Custom Trainer for multi-label
 class MultiLabelTrainer(Trainer):
