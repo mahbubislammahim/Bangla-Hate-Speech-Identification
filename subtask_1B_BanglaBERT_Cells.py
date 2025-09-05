@@ -1,4 +1,5 @@
 # =============================================================================
+# team_hate_mate
 # BanglaBERT Hate Speech Detection
 # Subtask 1B: Enhanced Model with Additional Layers
 # =============================================================================
@@ -47,15 +48,13 @@ train_file = 'blp25_hatespeech_subtask_1B_train.tsv'
 validation_file = 'blp25_hatespeech_subtask_1B_dev.tsv'
 test_file = 'blp25_hatespeech_subtask_1B_dev_test.tsv'
 
-# Model settings - BETTER BASE MODEL
-model_name = 'csebuetnlp/banglabert'  # Use Large instead of base
+model_name = 'csebuetnlp/banglabert'
 
 
 max_seq_length = 256
 use_enhanced_model = True   # Enhanced architecture on top of better base model
 
-print(f"🚀 Using BanglaBERT model: {model_name}")
-print("💡 Large models typically perform 3-5% better than base models")
+print(f"Using BanglaBERT model: {model_name}")
 
 # Training settings - OPTIMIZED for Large Model
 training_args = TrainingArguments(
@@ -201,12 +200,10 @@ class EnhancedBanglaBERT(nn.Module):
         else:
             pooled_output = outputs.pooler_output
         
-        # Enhanced classification head (simple or full)
+        # Enhanced classification head
         x = self.dropout1(pooled_output)
         x = self.dense1(x)
         x = self.activation1(x)
-        
-        # Full enhancement
         x = self.dropout2(x)
         
         logits = self.classifier(x)
@@ -286,7 +283,7 @@ def preprocess_function(examples):
     cleaned_texts = []
     for text in texts:
         text = str(text)
-        text = normalize(text)
+        text = normalize(text) # normalize data for Bangla
         cleaned_texts.append(text)
     
     # Tokenize
@@ -426,7 +423,7 @@ predictions = trainer.predict(predict_dataset_clean, metric_key_prefix="predict"
 predictions = np.argmax(predictions, axis=1)
 
 # Save predictions
-output_file = os.path.join(training_args.output_dir, "subtask_1B_predictions.tsv")
+output_file = os.path.join(training_args.output_dir, "subtask_1B.tsv")
 with open(output_file, "w") as writer:
     writer.write("id\tlabel\tmodel\n")
     for index, item in enumerate(predictions):
