@@ -1,7 +1,7 @@
 # =============================================================================
 # team_hate_mate
 # BanglaBERT Hate Speech Detection
-# Subtask 1B: Enhanced Model with Additional Layers
+# Subtask 1A: Enhanced Model with Additional Layers
 # =============================================================================
 
 # Step 1: Install Dependencies
@@ -43,10 +43,10 @@ logger = logging.getLogger(__name__)
 
 # Step 4: Configuration
 # =============================================================================
-# Data files
-train_file = 'blp25_hatespeech_subtask_1B_train.tsv'
-validation_file = 'blp25_hatespeech_subtask_1B_dev.tsv'
-test_file = 'blp25_hatespeech_subtask_1B_dev_test.tsv'
+# Data files (Subtask 1A)
+train_file = 'blp25_hatespeech_subtask_1A_train.tsv'
+validation_file = 'blp25_hatespeech_subtask_1A_dev.tsv'
+test_file = 'blp25_hatespeech_subtask_1A_dev_test.tsv'
 
 model_name = 'csebuetnlp/banglabert'
 
@@ -62,7 +62,7 @@ training_args = TrainingArguments(
     num_train_epochs=3,          
     per_device_train_batch_size=16, 
     per_device_eval_batch_size=16,  
-    output_dir="./banglabert_improved_model/",
+    output_dir="./banglabert_1A_enhanced/",
     overwrite_output_dir=True,
     remove_unused_columns=False,
     save_strategy="epoch",
@@ -76,7 +76,7 @@ training_args = TrainingArguments(
     gradient_accumulation_steps=2,
     logging_steps=50,
     logging_dir="./logs",
-    run_name="banglabert_1B_enhanced",
+    run_name="banglabert_1A_enhanced",
     report_to=None,
     dataloader_num_workers=0,
     fp16=True,
@@ -92,7 +92,8 @@ print("✅ Configuration loaded!")
 
 # Step 5: Load Data
 # =============================================================================
-l2id = {'None': 0, 'Society': 1, 'Organization': 2, 'Community': 3, 'Individual': 4}
+# Label mapping for Subtask 1A
+l2id = {'None': 0, 'Religious Hate': 1, 'Sexism': 2, 'Political Hate': 3, 'Profane': 4, 'Abusive': 5}
 
 # Load datasets
 print(f"📊 Loading datasets...")
@@ -422,7 +423,7 @@ predictions = trainer.predict(predict_dataset_clean, metric_key_prefix="predict"
 predictions = np.argmax(predictions, axis=1)
 
 # Save predictions
-output_file = os.path.join(training_args.output_dir, "subtask_1B.tsv")
+output_file = os.path.join(training_args.output_dir, "subtask_1A.tsv")
 with open(output_file, "w") as writer:
     writer.write("id\tlabel\tmodel\n")
     for index, item in enumerate(predictions):
@@ -447,7 +448,7 @@ print(f"📊 Final Results:")
 print(f"   • Validation Accuracy: {eval_metrics.get('eval_accuracy', 'N/A'):.4f}")
 print(f"   • Validation F1: {eval_metrics.get('eval_f1', 'N/A'):.4f}")
 print(f"   • Model saved in: {training_args.output_dir}")
-print(f"   • Standard predictions: subtask_1B_predictions.tsv")
+print(f"   • Standard predictions: subtask_1A.tsv")
 print("="*60)
 
 # Step 18: Create Model Card (Optional)
@@ -458,3 +459,5 @@ trainer.create_model_card(**kwargs)
 
 print("📄 Model card created!")
 print("✅ All tasks completed successfully!")
+
+
