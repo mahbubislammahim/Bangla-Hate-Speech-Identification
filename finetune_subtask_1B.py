@@ -4,11 +4,11 @@
 # Subtask 1B: Enhanced Model with Additional Layers
 # =============================================================================
 
-# CELL 1: Install Dependencies
+# Step 1: Install Dependencies
 # =============================================================================
 #pip install transformers datasets evaluate accelerate huggingface_hub sentencepiece
 
-# CELL 2: Import Libraries
+# Step 2: Import Libraries
 # =============================================================================
 import logging
 import os
@@ -29,7 +29,7 @@ from transformers import (
     default_data_collator, set_seed, EarlyStoppingCallback,
 )
 
-# CELL 3: Setup Environment
+# Step 3: Setup Environment
 # =============================================================================
 os.environ["WANDB_DISABLED"] = "true"
 
@@ -41,7 +41,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# CELL 4: Configuration
+# Step 4: Configuration
 # =============================================================================
 # Data files
 train_file = 'blp25_hatespeech_subtask_1B_train.tsv'
@@ -80,8 +80,7 @@ training_args = TrainingArguments(
     report_to=None,
     dataloader_num_workers=0,
     fp16=True,
-    # Conservative optimizations
-    lr_scheduler_type="linear",   # More stable than cosine
+    lr_scheduler_type="linear", 
     save_steps=500,
     eval_steps=500,
 )
@@ -91,7 +90,7 @@ set_seed(training_args.seed)
 
 print("✅ Configuration loaded!")
 
-# CELL 5: Load Data
+# Step 5: Load Data
 # =============================================================================
 l2id = {'None': 0, 'Society': 1, 'Organization': 2, 'Community': 3, 'Individual': 4}
 
@@ -137,7 +136,7 @@ raw_datasets = DatasetDict({
 
 print("✅ Data loaded successfully!")
 
-# CELL 6: Enhanced Model Architecture
+# Step 6: Enhanced Model Architecture
 # =============================================================================
 class EnhancedBanglaBERT(nn.Module):
     """BanglaBERT with enhanced classification head"""
@@ -229,7 +228,7 @@ class EnhancedBanglaBERT(nn.Module):
 
 print("🧠 Enhanced model architecture defined!")
 
-# CELL 7: Load Model and Tokenizer
+# Step 7: Load Model and Tokenizer
 # =============================================================================
 # Extract labels
 label_list = raw_datasets["train"].unique("label")
@@ -273,7 +272,7 @@ else:
     )
     print(f"✅ Standard model loaded! Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-# CELL 8: Preprocessing
+# Step 8: Preprocessing
 # =============================================================================
 def preprocess_function(examples):
     """Tokenize and clean text data"""
@@ -316,7 +315,7 @@ for split in raw_datasets.keys():
 
 print(f"📊 Final columns: {raw_datasets['train'].column_names}")
 
-# CELL 9: Prepare Training
+# Step 9: Prepare Training
 # =============================================================================
 # Prepare datasets
 train_dataset = raw_datasets["train"]
@@ -353,7 +352,7 @@ early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=3)
 
 print("✅ Training preparation complete!")
 
-# CELL 10: Initialize Trainer
+# Step 10: Initialize Trainer
 # =============================================================================
 trainer = Trainer(
     model=model,
@@ -368,7 +367,7 @@ trainer = Trainer(
 
 print("✅ Trainer initialized!")
 
-# CELL 11: Train Model
+# Step 11: Train Model
 # =============================================================================
 print("🚀 Starting training...")
 print(f"📊 Training samples: {len(train_dataset):,}")
@@ -381,7 +380,7 @@ metrics = train_result.metrics
 print("✅ Training completed!")
 print(f"📊 Training metrics: {metrics}")
 
-# CELL 12: Save Model
+# Step 12: Save Model
 # =============================================================================
 trainer.save_model()
 trainer.log_metrics("train", metrics)
@@ -390,7 +389,7 @@ trainer.save_state()
 
 print("✅ Model saved!")
 
-# CELL 13: Evaluate
+# Step 13: Evaluate
 # =============================================================================
 print("📊 Evaluating model...")
 
@@ -412,7 +411,7 @@ print(f"📊 Validation Accuracy: {eval_metrics.get('eval_accuracy', 'N/A'):.4f}
 print(f"📊 Validation F1: {eval_metrics.get('eval_f1', 'N/A'):.4f}")
 print(f"📊 Validation Loss: {eval_metrics.get('eval_loss', 'N/A'):.4f}")
 
-# CELL 14: Generate Predictions
+# Step 14: Generate Predictions
 # =============================================================================
 print("🎯 Generating predictions...")
 
@@ -433,27 +432,25 @@ with open(output_file, "w") as writer:
 
 print(f"✅ Predictions saved to: {output_file}")
 
-# CELL 17: Summary
+# Step 17: Summary
 # =============================================================================
 print("\n" + "="*60)
 print("🎯 TRAINING COMPLETE!")
 print("="*60)
 if use_enhanced_model:
-    print("✅ Enhanced BanglaBERT with additional layers")
+    print("Enhanced BanglaBERT with additional layers")
     print("   • Attention-based pooling")
 else:
-    print("✅ Standard BanglaBERT model")
+    print("Standard BanglaBERT model")
 
 print(f"📊 Final Results:")
 print(f"   • Validation Accuracy: {eval_metrics.get('eval_accuracy', 'N/A'):.4f}")
 print(f"   • Validation F1: {eval_metrics.get('eval_f1', 'N/A'):.4f}")
 print(f"   • Model saved in: {training_args.output_dir}")
 print(f"   • Standard predictions: subtask_1B_predictions.tsv")
-print(f"   • TTA predictions: subtask_1B_tta_predictions.tsv")
 print("="*60)
-print("🚀 Ready for submission!")
 
-# CELL 18: Create Model Card (Optional)
+# Step 18: Create Model Card (Optional)
 # =============================================================================
 # Create a model card for documentation
 kwargs = {"finetuned_from": model_name, "tasks": "text-classification"}
