@@ -6,7 +6,7 @@
 # CELL 1: Install Dependencies
 # ============================================================================
 
-#pip install transformers datasets evaluate accelerate scikit-learn
+#!pip install transformers datasets evaluate accelerate huggingface_hub sentencepiece git+https://github.com/csebuetnlp/normalizer
 
 # ============================================================================
 # CELL 2: Import Libraries
@@ -44,6 +44,8 @@ from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
+from normalizer import normalize
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -71,31 +73,37 @@ test_file = 'blp25_hatespeech_subtask_1C_dev_test.tsv'
 # ============================================================================
 
 training_args = TrainingArguments(
-    learning_rate=5e-6,  # Lower learning rate for large model
-    num_train_epochs=3,  # Optimal for 35K dataset (prevents overfitting)
-    per_device_train_batch_size=4,  # Smaller batch size for large model (335M params)
-    per_device_eval_batch_size=4,
+    learning_rate=4e-5,
+    num_train_epochs=2,  
+    per_device_train_batch_size=16, 
+    per_device_eval_batch_size=16,
     output_dir="./banglabert_large_1C/",
     overwrite_output_dir=True,
     remove_unused_columns=False,
     local_rank=-1,
     load_best_model_at_end=True,
-    save_total_limit=3,
+    resume_from_checkpoint=True,
+    save_total_limit=2,
     save_strategy="epoch",  # Save every epoch
-    evaluation_strategy="epoch",  # Evaluate every epoch
-    metric_for_best_model="eval_accuracy",
+    eval_strategy="epoch",  # Evaluate every epoch
+    metric_for_best_model="eval_average_f1",
     greater_is_better=True,
-    warmup_steps=1000,  # More warmup steps for large model
-    weight_decay=0.01,  # Add weight decay
-    logging_steps=100,
-    report_to=None
+    warmup_ratio=0.08, 
+    weight_decay=0.01, 
+    logging_steps=50,
+    report_to=None,
+    dataloader_num_workers=0,
+    fp16=True,
+    lr_scheduler_type="linear", 
+    save_steps=500,
+    eval_steps=500,
 )
 
 max_train_samples = None
 max_eval_samples = None
 max_predict_samples = None
-max_seq_length = 128  # Reduced for large model memory efficiency
-batch_size = 4
+max_seq_length = 256 
+batch_size = 16
 
 # ============================================================================
 # CELL 6: Setup Logging
@@ -119,7 +127,7 @@ logger.info(f"Training/evaluation parameters {training_args}")
 # CELL 7: Define Model (BANGLABERT LARGE)
 # ============================================================================
 
-model_name = 'csebuetnlp/banglabert_large'  # BanglaBERT Large model (335M parameters)
+model_name = 'csebuetnlp/banglabert'  
 print(f"🤖 Using BanglaBERT Large model: {model_name}")
 
 # ============================================================================
@@ -143,7 +151,7 @@ hate_type_l2id = {
 }
 hate_severity_l2id = {'Little to None': 0, 'Mild': 1, 'Severe': 2}
 to_whom_l2id = {
-    'None': 0,           # For NaN/null values
+    'None': 0,           
     'Individual': 1, 
     'Organization': 2, 
     'Community': 3, 
@@ -309,8 +317,9 @@ if max_seq_length > tokenizer.model_max_length:
 max_seq_length = min(max_seq_length, tokenizer.model_max_length)
 
 def preprocess_function(examples):
-    args = (examples[sentence1_key],)
-    result = tokenizer(*args, padding=padding, max_length=max_seq_length, truncation=True)
+    texts = examples[sentence1_key]
+    texts = [normalize(str(t)) for t in texts]
+    result = tokenizer(texts, padding=padding, max_length=max_seq_length, truncation=True)
     
     # Add labels for training/validation
     if "hate_type" in examples:
@@ -429,7 +438,7 @@ if "id" in eval_dataset.column_names:
 
 # Custom Trainer for multi-label
 class MultiLabelTrainer(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         outputs = model(**inputs)
         loss = outputs['loss']
         return (loss, outputs) if return_outputs else loss
@@ -464,7 +473,7 @@ trainer = MultiLabelTrainer(
     train_dataset=train_dataset,
     eval_dataset=eval_dataset,
     compute_metrics=compute_metrics,
-    tokenizer=tokenizer,
+    processing_class=tokenizer,
     data_collator=data_collator,
 )
 
@@ -497,118 +506,7 @@ trainer.save_state()
 print("✅ Training completed successfully!")
 print(f"📊 Training metrics: {metrics}")
 
-# ============================================================================
-# CELL 19: Evaluate Model (with Official Scorer)
-# ============================================================================
-
-logger.info("*** Evaluate ***")
-metrics = trainer.evaluate(eval_dataset=eval_dataset)
-max_eval_samples = (
-    max_eval_samples if max_eval_samples is not None else len(eval_dataset)
-)
-metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
-
-trainer.log_metrics("eval", metrics)
-trainer.save_metrics("eval", metrics)
-
-print("✅ Evaluation completed!")
-print(f"📊 Overall Accuracy: {metrics.get('eval_accuracy', 'N/A'):.4f}")
-print(f"📊 Hate Type Accuracy: {metrics.get('eval_hate_type_accuracy', 'N/A'):.4f}")
-print(f"📊 Hate Severity Accuracy: {metrics.get('eval_hate_severity_accuracy', 'N/A'):.4f}")
-print(f"📊 To Whom Accuracy: {metrics.get('eval_to_whom_accuracy', 'N/A'):.4f}")
-print(f"📊 Average F1: {metrics.get('eval_average_f1', 'N/A'):.4f}")
-
-# ============================================================================
-# OFFICIAL SCORER EVALUATION (using EXACT official scorer from scorer/task.py)
-# ============================================================================
-
-# Import official scorer functions directly
-import sys
-import os
-sys.path.append('/content')  # Add current directory to path for Colab
-
-# Copy official scorer functions EXACTLY from scorer/task.py
-def _extract_matching_lists_1C(pred_labels, gold_labels):
-    """EXACT copy from scorer/task.py"""
-    pred_values, gold_values = ({"hate_type": [], "hate_severity": [], "to_whom": []},
-                                {"hate_type": [], "hate_severity": [], "to_whom": []})
-
-    for k in gold_labels.keys():
-        pred_values["hate_type"].append(pred_labels[k][0])
-        pred_values["hate_severity"].append(pred_labels[k][1])
-        pred_values["to_whom"].append(pred_labels[k][2])
-        gold_values["hate_type"].append(gold_labels[k][0])
-        gold_values["hate_severity"].append(gold_labels[k][1])
-        gold_values["to_whom"].append(gold_labels[k][2])
-
-    return pred_values, gold_values
-
-def evaluate_1C(pred_labels, gold_labels):
-    """EXACT copy from scorer/task.py"""
-    pred_values, gold_values = _extract_matching_lists_1C(pred_labels, gold_labels)
-
-    h_acc = accuracy_score(gold_values["hate_type"], pred_values["hate_type"])
-    h_precision = precision_score(gold_values["hate_type"], pred_values["hate_type"], average='weighted')
-    h_recall = recall_score(gold_values["hate_type"], pred_values["hate_type"], average='weighted')
-    h_f1 = f1_score(gold_values["hate_type"], pred_values["hate_type"], average='micro')
-
-    s_acc = accuracy_score(gold_values["hate_severity"], pred_values["hate_severity"])
-    s_precision = precision_score(gold_values["hate_severity"], pred_values["hate_severity"], average='weighted')
-    s_recall = recall_score(gold_values["hate_severity"], pred_values["hate_severity"], average='weighted')
-    s_f1 = f1_score(gold_values["hate_severity"], pred_values["hate_severity"], average='micro')
-
-    w_acc = accuracy_score(gold_values["to_whom"], pred_values["to_whom"])
-    w_precision = precision_score(gold_values["to_whom"], pred_values["to_whom"], average='weighted')
-    w_recall = recall_score(gold_values["to_whom"], pred_values["to_whom"], average='weighted')
-    w_f1 = f1_score(gold_values["to_whom"], pred_values["to_whom"], average='micro')
-
-    acc = (h_acc + s_acc + w_acc) / 3
-    precision = (h_precision + s_precision + w_precision) / 3
-    recall = (h_recall + s_recall + w_recall) / 3
-    f1 = (h_f1 + s_f1 + w_f1) / 3
-
-    return acc, precision, recall, f1
-
-# Run official evaluation on validation data
-print("\n🏆 OFFICIAL SCORER EVALUATION (EXACT from scorer/task.py):")
-print("=" * 50)
-
-# Prepare data in official scorer format
-val_predictions = {}
-val_gold_labels = {}
-
-# Get validation predictions
-val_pred_results = trainer.predict(eval_dataset, metric_key_prefix="eval")
-val_hate_type_preds = np.argmax(val_pred_results.predictions[0], axis=1)
-val_hate_severity_preds = np.argmax(val_pred_results.predictions[1], axis=1)
-val_to_whom_preds = np.argmax(val_pred_results.predictions[2], axis=1)
-
-# Get validation IDs and labels
-val_df_original = pd.read_csv(validation_file, sep='\t')
-for idx, row in val_df_original.iterrows():
-    doc_id = str(row['id'])
-    val_predictions[doc_id] = [
-        hate_type_id2l[val_hate_type_preds[idx]],
-        hate_severity_id2l[val_hate_severity_preds[idx]], 
-        to_whom_id2l[val_to_whom_preds[idx]]
-    ]
-    val_gold_labels[doc_id] = [
-        str(row['hate_type']) if pd.notna(row['hate_type']) else 'None',
-        str(row['hate_severity']),
-        str(row['to_whom']) if pd.notna(row['to_whom']) else 'None'
-    ]
-
-# Run EXACT official evaluation (same as competition)
-acc, precision, recall, f1 = evaluate_1C(val_predictions, val_gold_labels)
-
-print(f"📊 OFFICIAL COMPETITION SCORES:")
-print(f"   Accuracy: {acc:.4f}")
-print(f"   Precision: {precision:.4f}")
-print(f"   Recall: {recall:.4f}")
-print(f"   F1: {f1:.4f}")
-
-print("\n🎯 These are the EXACT metrics the competition will use!")
-print("✅ Using identical functions from scorer/task.py")
+## Evaluation and official scorer steps removed per requirement
 
 # ============================================================================
 # CELL 20: Generate Predictions
@@ -640,41 +538,13 @@ if trainer.is_world_process_zero():
 
 print(f"✅ Predictions saved to: {output_predict_file}")
 
-# Show prediction distribution
-print("\n📊 Prediction distribution:")
-print("Hate Type:")
-hate_type_pred_counts = pd.Series(hate_type_predictions).value_counts().sort_index()
-for label_id, count in hate_type_pred_counts.items():
-    print(f"  {hate_type_id2l[label_id]}: {count}")
-
-print("\nHate Severity:")
-hate_severity_pred_counts = pd.Series(hate_severity_predictions).value_counts().sort_index()
-for label_id, count in hate_severity_pred_counts.items():
-    print(f"  {hate_severity_id2l[label_id]}: {count}")
-
-print("\nTo Whom:")
-to_whom_pred_counts = pd.Series(to_whom_predictions).value_counts().sort_index()
-for label_id, count in to_whom_pred_counts.items():
-    print(f"  {to_whom_id2l[label_id]}: {count}")
+## Omit verbose prediction distribution printing
 
 # ============================================================================
 # CELL 21: Show Results
 # ============================================================================
 
-# Display final results
-print("🎉 Multi-Label Training and Evaluation Summary")
-print("=" * 60)
+print("🎉 Training complete and predictions generated!")
 print(f"🤖 Model: {model_name}")
-print(f"📊 Training samples: {len(train_dataset)}")
-print(f"📊 Validation samples: {len(eval_dataset)}")
-print(f"📊 Test samples: {len(predictions[0])}")
-print(f"📊 Overall Accuracy: {metrics.get('eval_accuracy', 'N/A'):.4f}")
-print(f"📊 Hate Type Accuracy: {metrics.get('eval_hate_type_accuracy', 'N/A'):.4f}")
-print(f"📊 Hate Severity Accuracy: {metrics.get('eval_hate_severity_accuracy', 'N/A'):.4f}")
-print(f"📊 To Whom Accuracy: {metrics.get('eval_to_whom_accuracy', 'N/A'):.4f}")
-print(f"📊 Average F1 Score: {metrics.get('eval_average_f1', 'N/A'):.4f}")
 print(f"📁 Output file: {output_predict_file}")
 print(f"📁 Model saved in: {training_args.output_dir}")
-
-print("\n✅ All done! Multi-label model trained and predictions generated!")
-print("This model simultaneously predicts hate_type, hate_severity, and to_whom!")
