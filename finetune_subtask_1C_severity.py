@@ -20,7 +20,7 @@ from normalizer import normalize
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import transformers
 from transformers import (
-    AutoConfig, AutoModel, AutoTokenizer,
+    AutoConfig, AutoModel, AutoModelForSequenceClassification, AutoTokenizer,
     EvalPrediction, Trainer, TrainingArguments,
     default_data_collator, set_seed, EarlyStoppingCallback,
 )
@@ -43,6 +43,7 @@ test_file = 'blp25_hatespeech_subtask_1C_dev_test.tsv'
 
 model_name = 'csebuetnlp/banglabert'
 max_seq_length = 256
+use_enhanced_model = False 
 
 # Severity label mapping from 1C
 severity_l2id = {'Little to None': 0, 'Mild': 1, 'Severe': 2}
@@ -226,12 +227,20 @@ for split in raw_datasets.keys():
 
 # Step 7: Model, metrics, trainer
 # =============================================================================
-model = EnhancedBanglaBERT(
-    model_name=model_name,
-    num_labels=num_labels,
-    hidden_dropout=0.3,
-    use_attention_pooling=True,
-)
+if use_enhanced_model:
+    print("🚀 Using Enhanced head for 1C severity...")
+    model = EnhancedBanglaBERT(
+        model_name=model_name,
+        num_labels=num_labels,
+        hidden_dropout=0.3,
+        use_attention_pooling=True,
+    )
+else:
+    print("📊 Using AutoModelForSequenceClassification for 1C severity...")
+    config = AutoConfig.from_pretrained(model_name, num_labels=num_labels)
+    model = AutoModelForSequenceClassification.from_pretrained(
+        model_name, config=config
+    )
 
 def compute_metrics(p: EvalPrediction):
     preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
@@ -250,6 +259,12 @@ def compute_metrics(p: EvalPrediction):
 train_dataset = raw_datasets["train"]
 eval_dataset = raw_datasets["validation"]
 predict_dataset = raw_datasets["test"]
+
+# Remove id column if exists (to avoid passing unexpected kwargs to model)
+if "id" in train_dataset.column_names:
+    train_dataset = train_dataset.remove_columns("id")
+if "id" in eval_dataset.column_names:
+    eval_dataset = eval_dataset.remove_columns("id")
 
 data_collator = default_data_collator
 early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=3)

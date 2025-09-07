@@ -323,9 +323,10 @@ eval_dataset = raw_datasets["validation"]
 predict_dataset = raw_datasets["test"]
 
 # Remove id column if exists
-for dataset in [train_dataset, eval_dataset]:
-    if "id" in dataset.column_names:
-        dataset = dataset.remove_columns("id")
+if "id" in train_dataset.column_names:
+    train_dataset = train_dataset.remove_columns("id")
+if "id" in eval_dataset.column_names:
+    eval_dataset = eval_dataset.remove_columns("id")
 
 # Metrics function
 def compute_metrics(p: EvalPrediction):
@@ -348,7 +349,7 @@ def compute_metrics(p: EvalPrediction):
 data_collator = default_data_collator
 
 # Early stopping
-early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=3)
+early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=6)
 
 print("✅ Training preparation complete!")
 
