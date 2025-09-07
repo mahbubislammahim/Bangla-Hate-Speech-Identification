@@ -266,7 +266,9 @@ def run_cascade(threshold: float = 0.5):
     logger.info("Loading 1B (binary) datasets...")
     ds1 = load_1b_binary_datasets()
     # Train stage 1
-    trainer1, tok1 = train_stage(ds1, tokenizer=AutoTokenizer.from_pretrained("csebuetnlp/banglabert"), model=EnhancedBanglaBERT("csebuetnlp/banglabert", 2), output_dir="./cascade_stage1_1B_binary")
+    # Use standard AutoModelForSequenceClassification for binary classification
+    tok1, mdl1 = build_tokenizer_and_model("csebuetnlp/banglabert", 2)
+    trainer1, tok1 = train_stage(ds1, tokenizer=tok1, model=mdl1, output_dir="./cascade_stage1_1B_binary")
 
     # Stage 2: 1B -> 4 hate classes (trained on hate-only) with EnhancedBanglaBERT
     logger.info("Loading 1B (multiclass) datasets...")
