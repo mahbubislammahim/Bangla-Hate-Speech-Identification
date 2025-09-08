@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 from datasets import Dataset, DatasetDict
 from normalizer import normalize
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, classification_report
 import transformers
 from transformers import (
     AutoConfig, AutoModel, AutoModelForSequenceClassification, AutoTokenizer,
@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # Data files
 train_file = 'blp25_hatespeech_subtask_1B_train.tsv'
 validation_file = 'blp25_hatespeech_subtask_1B_dev.tsv'
-test_file = 'blp25_hatespeech_subtask_1B_dev_test.tsv'
+test_file = 'blp25_hatespeech_subtask_1B_test.tsv'
 
 model_name = 'csebuetnlp/banglabert'
 
@@ -59,7 +59,7 @@ print(f"Using BanglaBERT model: {model_name}")
 # Training settings - OPTIMIZED for Large Model
 training_args = TrainingArguments(
     learning_rate=4e-5,          
-    num_train_epochs=3,          
+    num_train_epochs=4,          
     per_device_train_batch_size=16, 
     per_device_eval_batch_size=16,  
     output_dir="./banglabert_improved_model/",
@@ -71,7 +71,7 @@ training_args = TrainingArguments(
     load_best_model_at_end=True,
     metric_for_best_model="eval_f1",
     greater_is_better=True,
-    warmup_steps=300,        
+    warmup_ratio=0.08,        
     weight_decay=0.01,
     gradient_accumulation_steps=2,
     logging_steps=50,
@@ -141,10 +141,11 @@ print("✅ Data loaded successfully!")
 class EnhancedBanglaBERT(nn.Module):
     """BanglaBERT with enhanced classification head"""
     
-    def __init__(self, model_name, num_labels, hidden_dropout=0.2, use_attention_pooling=True, class_weights=None):
+    def __init__(self, model_name, num_labels, hidden_dropout=0.2, use_attention_pooling=True, class_weights=None, label_smoothing: float = 0.0):
         super().__init__()
         self.num_labels = num_labels
         self.use_attention_pooling = use_attention_pooling
+        self.label_smoothing = float(label_smoothing) if label_smoothing is not None else 0.0
         
         # Load pre-trained BanglaBERT
         self.bert = AutoModel.from_pretrained(model_name)
@@ -213,7 +214,7 @@ class EnhancedBanglaBERT(nn.Module):
             weights = getattr(self, 'class_weights', None)
             if weights is None:
                 weights = torch.ones(self.num_labels).to(logits.device)
-            loss_fn = nn.CrossEntropyLoss(weight=weights)
+            loss_fn = nn.CrossEntropyLoss(weight=weights, label_smoothing=self.label_smoothing)
             loss = loss_fn(logits.view(-1, self.num_labels), labels.view(-1))
         
         # Return only necessary outputs to avoid None values
@@ -261,6 +262,7 @@ if use_enhanced_model:
         num_labels=num_labels,
         hidden_dropout=0.3,
         use_attention_pooling=True,
+        label_smoothing=0.1,
         # class_weights=class_weights # not using class weights
     )
     print(f"✅ Enhanced model loaded! Parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -274,6 +276,11 @@ else:
 
 # Step 8: Preprocessing
 # =============================================================================
+# Respect model's maximum positional embeddings to avoid sequence length overflows
+model_max_length = getattr(model.config, 'max_position_embeddings', 512)
+effective_max_length = min(max_seq_length, model_max_length)
+print(f"🔧 Using effective max_length={effective_max_length} (model max={model_max_length})")
+
 def preprocess_function(examples):
     """Tokenize and clean text data"""
     texts = examples['text']
@@ -288,8 +295,8 @@ def preprocess_function(examples):
     # Tokenize
     result = tokenizer(
         cleaned_texts,
-        padding="max_length",
-        max_length=max_seq_length,
+        padding=False,
+        max_length=effective_max_length,
         truncation=True,
         return_tensors=None
     )
@@ -346,7 +353,7 @@ def compute_metrics(p: EvalPrediction):
     }
 
 # Data collator
-data_collator = default_data_collator
+data_collator = DataCollatorWithPadding(tokenizer=tokenizer, pad_to_multiple_of=8 if training_args.fp16 else None)
 
 # Early stopping
 early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=6)
@@ -411,6 +418,28 @@ trainer.save_metrics("eval", eval_metrics)
 print(f"📊 Validation Accuracy: {eval_metrics.get('eval_accuracy', 'N/A'):.4f}")
 print(f"📊 Validation F1: {eval_metrics.get('eval_f1', 'N/A'):.4f}")
 print(f"📊 Validation Loss: {eval_metrics.get('eval_loss', 'N/A'):.4f}")
+
+# Confusion Matrix and Class-wise Report
+print("\n🔎 Computing confusion matrix on validation set...")
+eval_pred_output = trainer.predict(eval_dataset, metric_key_prefix="eval")
+eval_preds = np.argmax(eval_pred_output.predictions, axis=1)
+eval_labels = eval_pred_output.label_ids
+
+labels_order = list(range(num_labels))
+labels_names = [id2l[i] for i in labels_order]
+
+cm = confusion_matrix(eval_labels, eval_preds, labels=labels_order)
+cm_df = pd.DataFrame(cm, index=[f"true_{n}" for n in labels_names], columns=[f"pred_{n}" for n in labels_names])
+print("\nConfusion Matrix (counts):")
+print(cm_df.to_string())
+
+cm_norm = (cm.T / np.maximum(cm.sum(axis=1), 1)).T
+cm_norm_df = pd.DataFrame(np.round(cm_norm, 3), index=[f"true_{n}" for n in labels_names], columns=[f"pred_{n}" for n in labels_names])
+print("\nConfusion Matrix (row-normalized = recall per class):")
+print(cm_norm_df.to_string())
+
+print("\nClass-wise precision/recall/F1:")
+print(classification_report(eval_labels, eval_preds, labels=labels_order, target_names=labels_names, digits=3))
 
 # Step 14: Generate Predictions
 # =============================================================================
