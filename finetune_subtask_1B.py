@@ -56,10 +56,10 @@ use_enhanced_model = True   # Enhanced architecture on top of better base model
 
 print(f"Using BanglaBERT model: {model_name}")
 
-# Training settings - OPTIMIZED for Large Model
+# Training settings - OPTIMIZED
 training_args = TrainingArguments(
     learning_rate=4e-5,          
-    num_train_epochs=4,          
+    num_train_epochs=3,          
     per_device_train_batch_size=16, 
     per_device_eval_batch_size=16,  
     output_dir="./banglabert_improved_model/",
@@ -71,7 +71,7 @@ training_args = TrainingArguments(
     load_best_model_at_end=True,
     metric_for_best_model="eval_f1",
     greater_is_better=True,
-    warmup_ratio=0.08,        
+    warmup_ratio=0.1,        
     weight_decay=0.01,
     gradient_accumulation_steps=2,
     logging_steps=50,
@@ -80,7 +80,6 @@ training_args = TrainingArguments(
     report_to=None,
     dataloader_num_workers=0,
     fp16=True,
-    lr_scheduler_type="linear", 
     save_steps=500,
     eval_steps=500,
 )
@@ -141,7 +140,7 @@ print("✅ Data loaded successfully!")
 class EnhancedBanglaBERT(nn.Module):
     """BanglaBERT with enhanced classification head"""
     
-    def __init__(self, model_name, num_labels, hidden_dropout=0.2, use_attention_pooling=True, class_weights=None, label_smoothing: float = 0.0):
+    def __init__(self, model_name, num_labels, use_attention_pooling=True, class_weights=None, label_smoothing: float = 0.0):
         super().__init__()
         self.num_labels = num_labels
         self.use_attention_pooling = use_attention_pooling
@@ -165,11 +164,11 @@ class EnhancedBanglaBERT(nn.Module):
         if use_attention_pooling:
             self.attention_pooling = nn.Linear(hidden_size, 1)
         
-        # Full enhancement
-        self.dropout1 = nn.Dropout(hidden_dropout)
+        # Optimized dropout configuration - progressive dropout
+        self.dropout1 = nn.Dropout(0.1)  # Lower dropout after pooling
         self.dense1 = nn.Linear(hidden_size, 512)
         self.activation1 = nn.GELU()
-        self.dropout2 = nn.Dropout(hidden_dropout)
+        self.dropout2 = nn.Dropout(0.2)  # Higher dropout before classifier
         self.classifier = nn.Linear(512, num_labels)
         
         # Initialize weights
@@ -260,9 +259,8 @@ if use_enhanced_model:
     model = EnhancedBanglaBERT(
         model_name=model_name,
         num_labels=num_labels,
-        hidden_dropout=0.3,
         use_attention_pooling=True,
-        label_smoothing=0.1,
+        label_smoothing=0.1,   # Optimal for hate speech classification
         # class_weights=class_weights # not using class weights
     )
     print(f"✅ Enhanced model loaded! Parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -276,10 +274,6 @@ else:
 
 # Step 8: Preprocessing
 # =============================================================================
-# Respect model's maximum positional embeddings to avoid sequence length overflows
-model_max_length = getattr(model.config, 'max_position_embeddings', 512)
-effective_max_length = min(max_seq_length, model_max_length)
-print(f"🔧 Using effective max_length={effective_max_length} (model max={model_max_length})")
 
 def preprocess_function(examples):
     """Tokenize and clean text data"""
@@ -296,7 +290,7 @@ def preprocess_function(examples):
     result = tokenizer(
         cleaned_texts,
         padding=False,
-        max_length=effective_max_length,
+        max_length=max_seq_length,
         truncation=True,
         return_tensors=None
     )
@@ -352,11 +346,7 @@ def compute_metrics(p: EvalPrediction):
         "recall": recall
     }
 
-# Data collator
-data_collator = DataCollatorWithPadding(tokenizer=tokenizer, pad_to_multiple_of=8 if training_args.fp16 else None)
 
-# Early stopping
-early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=6)
 
 print("✅ Training preparation complete!")
 
@@ -369,8 +359,6 @@ trainer = Trainer(
     eval_dataset=eval_dataset,
     compute_metrics=compute_metrics,
     processing_class=tokenizer,
-    data_collator=data_collator,
-    callbacks=[early_stopping_callback],
 )
 
 print("✅ Trainer initialized!")
@@ -458,7 +446,7 @@ with open(output_file, "w") as writer:
     for index, item in enumerate(predictions):
         item = label_list[item]
         item = id2l[item]
-        writer.write(f"{ids[index]}\t{item}\t{model_name}\n")
+        writer.write(f"{ids[index]}\t{item}\tenhanced-{model_name}\n")
 
 print(f"✅ Predictions saved to: {output_file}")
 
