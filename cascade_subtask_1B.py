@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # File paths (same style as finetune_subtask_1B.py; expect files next to script or CWD)
 TRAIN_1B = 'blp25_hatespeech_subtask_1B_train.tsv'
 DEV_1B = 'blp25_hatespeech_subtask_1B_dev.tsv'
-TEST_1B = 'blp25_hatespeech_subtask_1B_dev_test.tsv'
+TEST_1B = 'blp25_hatespeech_subtask_1B_test.tsv'
 
 
 # Label mappings
@@ -202,7 +202,7 @@ def train_stage(dataset: DatasetDict, tokenizer, model, output_dir: str) -> tupl
         eval_dataset = eval_dataset.remove_columns("id")
 
     args = TrainingArguments(
-        learning_rate=4e-5,
+        learning_rate=3e-5,
         num_train_epochs=3,
         per_device_train_batch_size=16,
         per_device_eval_batch_size=16,
@@ -210,7 +210,7 @@ def train_stage(dataset: DatasetDict, tokenizer, model, output_dir: str) -> tupl
         overwrite_output_dir=True,
         remove_unused_columns=False,
         save_strategy="epoch",
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         save_total_limit=2,
         load_best_model_at_end=True,
         metric_for_best_model="eval_f1",
@@ -253,7 +253,7 @@ def train_stage(dataset: DatasetDict, tokenizer, model, output_dir: str) -> tupl
     return trainer, tokenizer
 
 
-def route_indices_by_stage1(pred_probs: np.ndarray, ids: List, threshold: float = 0.5):
+def route_indices_by_stage1(pred_probs: np.ndarray, ids: List, threshold: float = 0.1):
     # pred_probs is probability for class 1 (hate)
     is_hate = pred_probs >= threshold
     hate_idx = np.where(is_hate)[0]
@@ -261,7 +261,7 @@ def route_indices_by_stage1(pred_probs: np.ndarray, ids: List, threshold: float 
     return hate_idx, none_idx
 
 
-def run_cascade(threshold: float = 0.5):
+def run_cascade(threshold: float = 0.1):
     # Stage 1: 1B -> binary (None vs Hate) with EnhancedBanglaBERT
     logger.info("Loading 1B (binary) datasets...")
     ds1 = load_1b_binary_datasets()
@@ -274,30 +274,63 @@ def run_cascade(threshold: float = 0.5):
     logger.info("Loading 1B (multiclass) datasets...")
     ds2_full = load_1b_multiclass_datasets()
     # Filter to hate-only and remap 1..4 -> 0..3
-    train2 = ds2_full["train"].filter(lambda eg: eg["label"] != 0).map(lambda eg: {"label": eg["label"] - 1})
-    eval2 = ds2_full["validation"].filter(lambda eg: eg["label"] != 0).map(lambda eg: {"label": eg["label"] - 1})
+    tok2, mdl2 = build_tokenizer_and_model("csebuetnlp/banglabert", 5)
+    train2 = ds2_full["train"]
+    eval2 = ds2_full["validation"]
     ds2 = DatasetDict({"train": train2, "validation": eval2, "test": ds2_full["test"]})
-    trainer2, tok2 = train_stage(ds2, tokenizer=AutoTokenizer.from_pretrained("csebuetnlp/banglabert"), model=EnhancedBanglaBERT("csebuetnlp/banglabert", 4), output_dir="./cascade_stage2_1B_hate")
+    trainer2, tok2 = train_stage(ds2, tokenizer=tok2, model=mdl2, output_dir="./cascade_stage2_1B_hate")
 
 
     # Cascaded inference on 1B dev and test
     id2l_1B = {v: k for k, v in L2ID_1B.items()}
 
-    def predict_stage1(texts: List[str]) -> np.ndarray:
-        enc = trainer1.tokenizer([normalize(str(t)) for t in texts], padding=True, truncation=True, max_length=MAX_SEQ_LEN, return_tensors="pt")
-        with torch.no_grad():
-            outputs = trainer1.model(**{k: v.to(trainer1.model.device) for k, v in enc.items()})
-            logits = outputs.logits.detach().cpu().numpy()
-            probs = torch.softmax(torch.tensor(logits), dim=-1).numpy()[:, 1]
-        return probs
+    def predict_stage1(texts: List[str], batch_size: int = 32) -> np.ndarray:
+        all_probs = []
+        model = trainer1.model
+        tokenizer = trainer1.processing_class
+        device = next(model.parameters()).device
 
-    def predict_stage2(texts: List[str]) -> np.ndarray:
-        enc = trainer2.tokenizer([normalize(str(t)) for t in texts], padding=True, truncation=True, max_length=MAX_SEQ_LEN, return_tensors="pt")
-        with torch.no_grad():
-            outputs = trainer2.model(**{k: v.to(trainer2.model.device) for k, v in enc.items()})
-            logits = outputs.logits.detach().cpu().numpy()
-            preds = np.argmax(logits, axis=1)
-        return preds
+        for i in range(0, len(texts), batch_size):
+            batch_texts = texts[i : i + batch_size]
+            normalized_texts = [normalize(str(t)) for t in batch_texts]
+            enc = tokenizer(normalized_texts, padding=True, truncation=True, max_length=MAX_SEQ_LEN, return_tensors="pt")
+            enc = {k: v.to(device) for k, v in enc.items()}
+
+            with torch.no_grad():
+                outputs = model(**enc)
+                # Handle both Hugging Face model outputs (with .logits) and custom dict outputs
+                if isinstance(outputs, dict):
+                    logits = outputs['logits'].detach().cpu().numpy()
+                else:
+                    logits = outputs.logits.detach().cpu().numpy()
+                probs = torch.softmax(torch.tensor(logits), dim=-1).numpy()[:, 1]
+                all_probs.append(probs)
+        
+        return np.concatenate(all_probs, axis=0)
+
+    def predict_stage2(texts: List[str], batch_size: int = 32) -> np.ndarray:
+        all_preds = []
+        model = trainer2.model
+        tokenizer = trainer2.processing_class
+        device = next(model.parameters()).device
+
+        for i in range(0, len(texts), batch_size):
+            batch_texts = texts[i : i + batch_size]
+            normalized_texts = [normalize(str(t)) for t in batch_texts]
+            enc = tokenizer(normalized_texts, padding=True, truncation=True, max_length=MAX_SEQ_LEN, return_tensors="pt")
+            enc = {k: v.to(device) for k, v in enc.items()}
+
+            with torch.no_grad():
+                outputs = model(**enc)
+                # Handle both Hugging Face model outputs (with .logits) and custom dict outputs
+                if isinstance(outputs, dict):
+                    logits = outputs['logits'].detach().cpu().numpy()
+                else:
+                    logits = outputs.logits.detach().cpu().numpy()
+                preds = np.argmax(logits, axis=1)
+                all_preds.append(preds)
+        
+        return np.concatenate(all_preds, axis=0)
 
     # Dev routing
     dev_df_raw = pd.read_csv(DEV_1B, sep="\t")
@@ -309,8 +342,8 @@ def run_cascade(threshold: float = 0.5):
     dev_final = np.zeros(len(dev_texts), dtype=int)
     dev_final[none_idx] = 0
     if len(hate_idx) > 0:
-        sub_preds = predict_stage2([dev_texts[i] for i in hate_idx])  # 0..3
-        dev_final[hate_idx] = sub_preds + 1  # map back to 1..4
+        sub_preds = predict_stage2([dev_texts[i] for i in hate_idx]) 
+        dev_final[hate_idx] = sub_preds  
 
     # Save dev predictions
     dev_out = os.path.join("./cascade_outputs", "subtask_1B_dev_cascade.tsv")
@@ -332,29 +365,15 @@ def run_cascade(threshold: float = 0.5):
     test_final[none_idx_t] = 0
     if len(hate_idx_t) > 0:
         sub_preds_t = predict_stage2([test_texts[i] for i in hate_idx_t])  # 0 to 3
-        test_final[hate_idx_t] = sub_preds_t + 1  # map back to 1..4
+        test_final[hate_idx_t] = sub_preds_t  # map back to 1..4
 
-    test_out = os.path.join("./cascade_outputs", "subtask_1B_test_cascade.tsv")
+    test_out = os.path.join("./cascade_outputs", "subtask_1B.tsv")
     with open(test_out, "w", encoding="utf-8") as w:
         w.write("id\tlabel\tmodel\n")
         for i, pid in enumerate(test_ids):
             w.write(f"{pid}\t{id2l_1B[int(test_final[i])]}\tcascade(banglabert->banglabert)\n")
     logger.info(f"Saved cascaded test predictions to {test_out}")
 
-    # Official evaluation on dev using provided scorer
-    try:
-        sys.path.append('.')
-        from scorer.task import evaluate, _read_tsv_input_file, _read_gold_labels_file
-        gold_file = DEV_1B
-        pred_labels = _read_tsv_input_file(dev_out)
-        gold_labels = _read_gold_labels_file(gold_file)
-        acc, precision, recall, f1 = evaluate(pred_labels, gold_labels, '1B')
-        logger.info(f"Official Dev Scores -> Acc: {acc:.4f} | P: {precision:.4f} | R: {recall:.4f} | F1: {f1:.4f}")
-    except Exception as e:
-        logger.warning(f"Evaluation skipped due to error: {e}")
-
 
 if __name__ == "__main__":
-    run_cascade(threshold=0.5)
-
-
+    run_cascade(threshold=0.1)
