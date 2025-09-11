@@ -59,10 +59,11 @@ MAX_SEQ_LEN = 256
 class EnhancedBanglaBERT(nn.Module):
     """Enhanced BanglaBERT with additional layers for better classification"""
     
-    def __init__(self, model_name: str, num_labels: int, hidden_dropout: float = 0.2, use_attention_pooling: bool = True):
+    def __init__(self, model_name: str, num_labels: int, hidden_dropout: float = 0.2, use_attention_pooling: bool = True,  label_smoothing: float = 0.0):
         super().__init__()
         self.num_labels = num_labels
         self.use_attention_pooling = use_attention_pooling
+        self.label_smoothing = float(label_smoothing) if label_smoothing is not None else 0.0
         
         # Load pre-trained BanglaBERT
         self.bert = AutoModel.from_pretrained(model_name)
@@ -80,10 +81,10 @@ class EnhancedBanglaBERT(nn.Module):
             self.attention_pooling = nn.Linear(hidden_size, 1)
         
         # Enhanced classification head
-        self.dropout1 = nn.Dropout(hidden_dropout)
+        self.dropout1 = nn.Dropout(0.1)
         self.dense1 = nn.Linear(hidden_size, 512)
         self.activation1 = nn.GELU()
-        self.dropout2 = nn.Dropout(hidden_dropout)
+        self.dropout2 = nn.Dropout(0.2)
         self.classifier = nn.Linear(512, num_labels)
         
         # Initialize weights
@@ -125,7 +126,7 @@ class EnhancedBanglaBERT(nn.Module):
         # Calculate loss if labels provided
         loss = None
         if labels is not None:
-            loss_fn = nn.CrossEntropyLoss()
+            loss_fn = nn.CrossEntropyLoss(label_smoothing=self.label_smoothing)
             loss = loss_fn(logits.view(-1, self.num_labels), labels.view(-1))
         
         result = {"logits": logits}
@@ -213,7 +214,8 @@ def build_enhanced_tokenizer_and_model(model_name: str, num_labels: int):
         model_name=model_name,
         num_labels=num_labels,
         hidden_dropout=0.2,
-        use_attention_pooling=True
+        use_attention_pooling=True,
+        label_smoothing=0.1
     )
     return tokenizer, model
 
@@ -272,7 +274,7 @@ def train_stage_binary_cv(dataset: DatasetDict, tokenizer_factory, model_factory
         
         args = TrainingArguments(
             learning_rate=3e-5,
-            num_train_epochs=3,
+            num_train_epochs=2,
             per_device_train_batch_size=16,
             per_device_eval_batch_size=16,
             output_dir=fold_output_dir,
@@ -284,7 +286,7 @@ def train_stage_binary_cv(dataset: DatasetDict, tokenizer_factory, model_factory
             load_best_model_at_end=True,
             metric_for_best_model="eval_f2",
             greater_is_better=True,
-            warmup_ratio=0.08,
+            warmup_ratio=0.1,
             weight_decay=0.01,
             gradient_accumulation_steps=2,
             logging_steps=50,
