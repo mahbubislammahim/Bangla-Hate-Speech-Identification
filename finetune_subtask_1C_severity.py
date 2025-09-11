@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 train_file = 'blp25_hatespeech_subtask_1C_train.tsv'
 validation_file = 'blp25_hatespeech_subtask_1C_dev.tsv'
-test_file = 'blp25_hatespeech_subtask_1C_dev_test.tsv'
+test_file = 'blp25_hatespeech_subtask_1C_test.tsv'
 
 model_name = 'csebuetnlp/banglabert'
 max_seq_length = 256

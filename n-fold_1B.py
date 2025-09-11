@@ -1,5 +1,5 @@
 # =============================================================================
-# Enhanced 5-Fold Cross-Validation Cascade Implementation for Subtask 1B
+# Enhanced 7-Fold Cross-Validation Cascade Implementation for Subtask 1B
 # =============================================================================
 
 import logging
@@ -235,8 +235,8 @@ def preprocess_dataset(ds: DatasetDict, tokenizer, max_len: int) -> DatasetDict:
     return processed
 
 
-def train_stage_binary_cv(dataset: DatasetDict, tokenizer_factory, model_factory, base_output_dir: str, n_folds: int = 5) -> List[Trainer]:
-    """Train 5-fold cross-validation models for stage 1 binary classification"""
+def train_stage_binary_cv(dataset: DatasetDict, tokenizer_factory, model_factory, base_output_dir: str, n_folds: int = 7) -> List[Trainer]:
+    """Train 7-fold cross-validation models for stage 1 binary classification"""
     train_dataset = dataset["train"]
     
     # Convert to pandas for stratified splitting
@@ -326,8 +326,8 @@ def train_stage_binary_cv(dataset: DatasetDict, tokenizer_factory, model_factory
     return trainers
 
 
-def train_stage_enhanced_multiclass_cv(dataset: DatasetDict, tokenizer_factory, model_factory, base_output_dir: str, n_folds: int = 5) -> List[Trainer]:
-    """Train 5-fold cross-validation models for stage 2 enhanced multiclass classification"""
+def train_stage_enhanced_multiclass_cv(dataset: DatasetDict, tokenizer_factory, model_factory, base_output_dir: str, n_folds: int = 7) -> List[Trainer]:
+    """Train 7-fold cross-validation models for stage 2 enhanced multiclass classification"""
     train_dataset = dataset["train"]
     
     # Convert to pandas for stratified splitting
@@ -482,15 +482,43 @@ def predict_stage2_ensemble(trainers: List[Trainer], tokenizers: List, texts: Li
         fold_preds = np.concatenate(fold_preds, axis=0)
         all_fold_preds.append(fold_preds)
     
-    # Take mode (most common prediction) across folds
+    # Take mode (most common prediction) across folds with priority-based tie-breaking
     all_fold_preds = np.array(all_fold_preds)  # shape: (n_folds, n_samples)
     ensemble_preds = []
+    
+    # Define priority order: 0 > 5 > 3 > 4 > 2
+    priority_order = {0: 5, 5: 4, 3: 3, 4: 2, 2: 1}  # Higher number = higher priority
+    
     for i in range(all_fold_preds.shape[1]):
         # Get predictions for sample i across all folds
         sample_preds = all_fold_preds[:, i]
-        # Take the most common prediction
+        
+        # Count occurrences of each prediction
         unique, counts = np.unique(sample_preds, return_counts=True)
-        ensemble_pred = unique[np.argmax(counts)]
+        
+        # Find the maximum count
+        max_count = np.max(counts)
+        
+        # Get all predictions that have the maximum count (tie candidates)
+        tie_candidates = unique[counts == max_count]
+        
+        if len(tie_candidates) == 1:
+            # No tie, take the most common prediction
+            ensemble_pred = tie_candidates[0]
+        else:
+            # Tie exists, break by priority order
+            # Select candidate with highest priority value
+            best_candidate = tie_candidates[0]
+            best_priority = priority_order.get(best_candidate, 0)
+            
+            for candidate in tie_candidates[1:]:
+                candidate_priority = priority_order.get(candidate, 0)
+                if candidate_priority > best_priority:
+                    best_candidate = candidate
+                    best_priority = candidate_priority
+            
+            ensemble_pred = best_candidate
+        
         ensemble_preds.append(ensemble_pred)
     
     return np.array(ensemble_preds)
@@ -506,11 +534,11 @@ def route_indices_by_stage1(pred_probs: np.ndarray, ids: List, threshold: float 
 
 
 def run_enhanced_cascade_cv(threshold: float = 0.3):
-    """Run the enhanced cascade approach with 5-fold cross-validation"""
-    logger.info("Starting Enhanced 5-Fold CV Cascade for Subtask 1B")
+    """Run the enhanced cascade approach with 7-fold cross-validation"""
+    logger.info("Starting Enhanced 7-Fold CV Cascade for Subtask 1B")
     
-    # Stage 1: Binary classification (None vs Hate) with 5-fold CV
-    logger.info("=== STAGE 1: Binary Classification with 5-Fold CV ===")
+    # Stage 1: Binary classification (None vs Hate) with 7-fold CV
+    logger.info("=== STAGE 1: Binary Classification with 7-Fold CV ===")
     logger.info("Loading 1B (binary) datasets...")
     ds1 = load_1b_binary_datasets()
     
@@ -527,16 +555,16 @@ def run_enhanced_cascade_cv(threshold: float = 0.3):
     tok1, _ = build_standard_tokenizer_and_model(MODEL_NAME_STAGE1, num_labels=2)
     ds1 = preprocess_dataset(ds1, tok1, MAX_SEQ_LEN)
     
-    # Train 5-fold CV models for stage 1
-    logger.info("Training 5-fold CV models for stage 1 binary classification...")
+    # Train 7-fold CV models for stage 1
+    logger.info("Training 7-fold CV models for stage 1 binary classification...")
     cv_trainers_binary = train_stage_binary_cv(ds1, binary_tokenizer_factory, binary_model_factory, 
-                                             base_output_dir="./enhanced_cascade_stage1_1B_binary_cv", n_folds=5)
+                                             base_output_dir="./enhanced_cascade_stage1_1B_binary_cv", n_folds=7)
     
     # Create tokenizers for each fold for inference
-    cv_tokenizers_binary = [binary_tokenizer_factory() for _ in range(5)]
+    cv_tokenizers_binary = [binary_tokenizer_factory() for _ in range(7)]
 
-    # Stage 2: Enhanced multiclass classification (All 5 classes) with 5-fold CV
-    logger.info("=== STAGE 2: Enhanced Multiclass Classification with 5-Fold CV ===")
+    # Stage 2: Enhanced multiclass classification (All 5 classes) with 7-fold CV
+    logger.info("=== STAGE 2: Enhanced Multiclass Classification with 7-Fold CV ===")
     logger.info("Loading 1B (multiclass) datasets...")
     ds2 = load_1b_multiclass_datasets()
     
@@ -553,13 +581,13 @@ def run_enhanced_cascade_cv(threshold: float = 0.3):
     tok2, _ = build_enhanced_tokenizer_and_model(MODEL_NAME_STAGE2, num_labels=5)
     ds2 = preprocess_dataset(ds2, tok2, MAX_SEQ_LEN)
     
-    # Train 5-fold CV enhanced models for stage 2
-    logger.info("Training 5-fold CV models for stage 2 enhanced multiclass classification...")
+    # Train 7-fold CV enhanced models for stage 2
+    logger.info("Training 7-fold CV models for stage 2 enhanced multiclass classification...")
     cv_trainers_enhanced = train_stage_enhanced_multiclass_cv(ds2, enhanced_tokenizer_factory, enhanced_model_factory,
-                                                            base_output_dir="./enhanced_cascade_stage2_1B_multiclass_cv", n_folds=5)
+                                                            base_output_dir="./enhanced_cascade_stage2_1B_multiclass_cv", n_folds=7)
     
     # Create tokenizers for each fold for inference
-    cv_tokenizers_enhanced = [enhanced_tokenizer_factory() for _ in range(5)]
+    cv_tokenizers_enhanced = [enhanced_tokenizer_factory() for _ in range(7)]
 
     # Cascaded inference on 1B dev and test
     id2l_1B = {v: k for k, v in L2ID_1B.items()}
@@ -626,7 +654,7 @@ def run_enhanced_cascade_cv(threshold: float = 0.3):
             w.write(f"{pid}\t{id2l_1B[int(test_final[i])]}\tenhanced_cascade_cv(banglabert->enhanced_banglabert)\n")
     logger.info(f"Saved enhanced cascaded CV test predictions to {test_out}")
     
-    logger.info("Enhanced 5-fold CV cascade completed successfully!")
+    logger.info("Enhanced 7-fold CV cascade completed successfully!")
 
 
 if __name__ == "__main__":
