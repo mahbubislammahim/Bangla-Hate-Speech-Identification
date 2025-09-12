@@ -2,7 +2,6 @@
 # team_hate_mate
 # BanglaBERT Hate Speech Detection
 # Subtask 1C (severity-only): Fine-tune to predict only hate_severity
-# Mirrors enhanced 1B setup for strong single-label performance
 # =============================================================================
 
 # Step 1: Imports and environment
@@ -43,7 +42,6 @@ test_file = 'blp25_hatespeech_subtask_1C_test.tsv'
 
 model_name = 'csebuetnlp/banglabert'
 max_seq_length = 256
-use_enhanced_model = False 
 
 # Severity label mapping from 1C
 severity_l2id = {'Little to None': 0, 'Mild': 1, 'Severe': 2}
@@ -119,64 +117,6 @@ raw_datasets = DatasetDict({
 })
 
 
-# Step 5: Define enhanced model head (mirrors 1B)
-# =============================================================================
-class EnhancedBanglaBERT(nn.Module):
-    def __init__(self, model_name, num_labels, hidden_dropout=0.3, use_attention_pooling=True):
-        super().__init__()
-        self.num_labels = num_labels
-        self.use_attention_pooling = use_attention_pooling
-        self.bert = AutoModel.from_pretrained(model_name)
-        hidden_size = self.bert.config.hidden_size
-        if use_attention_pooling:
-            self.attention_pooling = nn.Linear(hidden_size, 1)
-        self.dropout1 = nn.Dropout(hidden_dropout)
-        self.dense1 = nn.Linear(hidden_size, 512)
-        self.activation1 = nn.GELU()
-        self.dropout2 = nn.Dropout(hidden_dropout)
-        self.classifier = nn.Linear(512, num_labels)
-        self._init_weights()
-
-    def _init_weights(self):
-        for module in [self.dense1, self.classifier]:
-            if isinstance(module, nn.Linear):
-                module.weight.data.normal_(mean=0.0, std=0.02)
-                if module.bias is not None:
-                    module.bias.data.zero_()
-
-    def forward(self, input_ids, attention_mask=None, labels=None, **kwargs):
-        outputs = self.bert(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            output_hidden_states=True,
-            return_dict=True,
-        )
-
-        if self.use_attention_pooling and attention_mask is not None:
-            hidden_states = outputs.last_hidden_state
-            attention_weights = self.attention_pooling(hidden_states).squeeze(-1)
-            attention_weights = attention_weights.masked_fill(attention_mask == 0, float('-inf'))
-            attention_weights = torch.softmax(attention_weights, dim=-1)
-            pooled_output = torch.sum(hidden_states * attention_weights.unsqueeze(-1), dim=1)
-        else:
-            pooled_output = outputs.pooler_output
-
-        x = self.dropout1(pooled_output)
-        x = self.dense1(x)
-        x = self.activation1(x)
-        x = self.dropout2(x)
-        logits = self.classifier(x)
-
-        loss = None
-        if labels is not None:
-            loss_fn = nn.CrossEntropyLoss()
-            loss = loss_fn(logits.view(-1, self.num_labels), labels.view(-1))
-
-        result = {"logits": logits}
-        if loss is not None:
-            result["loss"] = loss
-        return result
-
 
 # Step 6: Tokenizer and preprocessing
 # =============================================================================
@@ -227,20 +167,11 @@ for split in raw_datasets.keys():
 
 # Step 7: Model, metrics, trainer
 # =============================================================================
-if use_enhanced_model:
-    print("🚀 Using Enhanced head for 1C severity...")
-    model = EnhancedBanglaBERT(
-        model_name=model_name,
-        num_labels=num_labels,
-        hidden_dropout=0.3,
-        use_attention_pooling=True,
-    )
-else:
-    print("📊 Using AutoModelForSequenceClassification for 1C severity...")
-    config = AutoConfig.from_pretrained(model_name, num_labels=num_labels)
-    model = AutoModelForSequenceClassification.from_pretrained(
-        model_name, config=config
-    )
+print("📊 Using AutoModelForSequenceClassification for 1C severity...")
+config = AutoConfig.from_pretrained(model_name, num_labels=num_labels)
+model = AutoModelForSequenceClassification.from_pretrained(
+    model_name, config=config
+)
 
 def compute_metrics(p: EvalPrediction):
     preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
@@ -324,5 +255,3 @@ print(f"   • Validation F1: {eval_metrics.get('eval_f1', 'N/A'):.4f}")
 print(f"   • Model saved in: {training_args.output_dir}")
 print(f"   • Predictions: subtask_1C_severity.tsv")
 print("="*60)
-
-

@@ -658,4 +658,4 @@ def run_enhanced_cascade_cv(threshold: float = 0.3):
 
 
 if __name__ == "__main__":
-    run_enhanced_cascade_cv(threshold=0.3)
+    run_enhanced_cascade_cv(threshold=0.5)

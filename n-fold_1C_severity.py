@@ -1,5 +1,5 @@
 # =============================================================================
-# Enhanced 7-Fold Cross-Validation Cascade Implementation for Subtask 1A
+# Enhanced 7-Fold Cross-Validation Cascade Implementation for Subtask 1C Severity
 # =============================================================================
 
 import logging
@@ -13,6 +13,7 @@ import torch.nn as nn
 from datasets import Dataset, DatasetDict
 from transformers import (
     AutoConfig,
+    AutoModel,
     AutoModelForSequenceClassification,
     AutoTokenizer,
     Trainer,
@@ -35,19 +36,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# File paths for subtask 1A
-TRAIN_1A = 'blp25_hatespeech_subtask_1A_train.tsv'
-DEV_1A = 'blp25_hatespeech_subtask_1A_dev.tsv'
-TEST_1A = 'blp25_hatespeech_subtask_1A_test.tsv'
+# File paths for subtask 1C (matching original severity file)
+TRAIN_1C = 'blp25_hatespeech_subtask_1C_train.tsv'
+DEV_1C = 'blp25_hatespeech_subtask_1C_dev.tsv'
+TEST_1C = 'blp25_hatespeech_subtask_1C_test.tsv'
 
-# Label mappings for subtask 1A (6 classes)
-L2ID_1A = {
-    "None": 0,
-    "Religious Hate": 1,
-    "Sexism": 2,
-    "Political Hate": 3,
-    "Profane": 4,
-    "Abusive": 5,
+# Severity label mappings for subtask 1C
+SEVERITY_L2ID = {
+    "Little to None": 0,
+    "Mild": 1,
+    "Severe": 2,
 }
 
 MODEL_NAME_STAGE1 = "csebuetnlp/banglabert"
@@ -56,15 +54,95 @@ MODEL_NAME_STAGE2 = "csebuetnlp/banglabert"
 MAX_SEQ_LEN = 256
 
 
-def load_1a_binary_datasets() -> DatasetDict:
-    """Load 1A data and convert to binary labels: 0 -> None, 1 -> Hate (any non-None)."""
-    train_df = pd.read_csv(TRAIN_1A, sep="\t")
-    dev_df = pd.read_csv(DEV_1A, sep="\t")
-    test_df = pd.read_csv(TEST_1A, sep="\t")
+class EnhancedBanglaBERT(nn.Module):
+    """Enhanced BanglaBERT with additional layers for better classification"""
+    
+    def __init__(self, model_name: str, num_labels: int, hidden_dropout: float = 0.2, use_attention_pooling: bool = True,  label_smoothing: float = 0.0):
+        super().__init__()
+        self.num_labels = num_labels
+        self.use_attention_pooling = use_attention_pooling
+        self.label_smoothing = float(label_smoothing) if label_smoothing is not None else 0.0
+        
+        # Load pre-trained BanglaBERT
+        self.bert = AutoModel.from_pretrained(model_name)
+        self.config = self.bert.config
+        
+        # Update config for classification
+        self.config.num_labels = num_labels
+        self.config.label2id = {f"LABEL_{i}": i for i in range(num_labels)}
+        self.config.id2label = {i: f"LABEL_{i}" for i in range(num_labels)}
+        
+        hidden_size = self.bert.config.hidden_size
+        
+        # Attention pooling layer
+        if use_attention_pooling:
+            self.attention_pooling = nn.Linear(hidden_size, 1)
+        
+        # Enhanced classification head
+        self.dropout1 = nn.Dropout(0.1)
+        self.dense1 = nn.Linear(hidden_size, 512)
+        self.activation1 = nn.GELU()
+        self.dropout2 = nn.Dropout(0.2)
+        self.classifier = nn.Linear(512, num_labels)
+        
+        # Initialize weights
+        self._init_weights()
+    
+    def _init_weights(self):
+        for module in [self.dense1, self.classifier]:
+            if isinstance(module, nn.Linear):
+                module.weight.data.normal_(mean=0.0, std=0.02)
+                if module.bias is not None:
+                    module.bias.data.zero_()
+    
+    def forward(self, input_ids, attention_mask=None, labels=None, **kwargs):
+        outputs = self.bert(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            return_dict=True
+        )
+        
+        # Attention pooling or standard pooling
+        if self.use_attention_pooling and attention_mask is not None:
+            hidden_states = outputs.last_hidden_state
+            attention_weights = self.attention_pooling(hidden_states).squeeze(-1)
+            attention_weights = attention_weights.masked_fill(attention_mask == 0, float('-inf'))
+            attention_weights = torch.softmax(attention_weights, dim=-1)
+            pooled_output = torch.sum(hidden_states * attention_weights.unsqueeze(-1), dim=1)
+        else:
+            pooled_output = outputs.pooler_output
+        
+        # Enhanced classification head
+        x = self.dropout1(pooled_output)
+        x = self.dense1(x)
+        x = self.activation1(x)
+        x = self.dropout2(x)
+        
+        logits = self.classifier(x)
+        
+        # Calculate loss if labels provided
+        loss = None
+        if labels is not None:
+            loss_fn = nn.CrossEntropyLoss(label_smoothing=self.label_smoothing)
+            loss = loss_fn(logits.view(-1, self.num_labels), labels.view(-1))
+        
+        result = {"logits": logits}
+        if loss is not None:
+            result["loss"] = loss
+            
+        return result
+
+
+def load_1c_binary_datasets() -> DatasetDict:
+    """Load 1C data and convert to binary labels: 0 -> Little to None, 1 -> Has severity (Mild or Severe)."""
+    train_df = pd.read_csv(TRAIN_1C, sep="\t")
+    dev_df = pd.read_csv(DEV_1C, sep="\t")
+    test_df = pd.read_csv(TEST_1C, sep="\t")
 
     def to_binary(df: pd.DataFrame) -> pd.DataFrame:
         mapped = df.copy()
-        mapped["label"] = df["label"].map(L2ID_1A).fillna(0).astype(int).apply(lambda x: 0 if x == 0 else 1)
+        mapped["label"] = df["hate_severity"].map(SEVERITY_L2ID).fillna(0).astype(int).apply(lambda x: 0 if x == 0 else 1)
         return mapped
 
     train_df = to_binary(train_df)
@@ -80,14 +158,14 @@ def load_1a_binary_datasets() -> DatasetDict:
     )
 
 
-def load_1a_multiclass_datasets() -> DatasetDict:
-    """Load 1A data; keep original 6 labels with 0 as None."""
-    train_df = pd.read_csv(TRAIN_1A, sep="\t")
-    dev_df = pd.read_csv(DEV_1A, sep="\t")
-    test_df = pd.read_csv(TEST_1A, sep="\t")
+def load_1c_multiclass_datasets() -> DatasetDict:
+    """Load 1C data; keep original 3 severity labels."""
+    train_df = pd.read_csv(TRAIN_1C, sep="\t")
+    dev_df = pd.read_csv(DEV_1C, sep="\t")
+    test_df = pd.read_csv(TEST_1C, sep="\t")
 
     for df in (train_df, dev_df):
-        df["label"] = df["label"].map(L2ID_1A).fillna(0).astype(int)
+        df["label"] = df["hate_severity"].map(SEVERITY_L2ID).fillna(0).astype(int)
 
     return DatasetDict(
         {
@@ -98,8 +176,8 @@ def load_1a_multiclass_datasets() -> DatasetDict:
     )
 
 
-def build_tokenizer_and_model(model_name: str, num_labels: int):
-    """Build standard model for classification"""
+def build_standard_tokenizer_and_model(model_name: str, num_labels: int):
+    """Build standard model for binary classification stage"""
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
         cache_dir=None,
@@ -123,6 +201,19 @@ def build_tokenizer_and_model(model_name: str, num_labels: int):
         revision="main",
         use_auth_token=None,
         ignore_mismatched_sizes=False,
+    )
+    return tokenizer, model
+
+
+def build_enhanced_tokenizer_and_model(model_name: str, num_labels: int):
+    """Build enhanced model for multiclass classification stage"""
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = EnhancedBanglaBERT(
+        model_name=model_name,
+        num_labels=num_labels,
+        hidden_dropout=0.2,
+        use_attention_pooling=True,
+        label_smoothing=0.1
     )
     return tokenizer, model
 
@@ -172,7 +263,8 @@ def train_stage_binary_cv(dataset: DatasetDict, tokenizer_factory, model_factory
             fold_val_dataset = fold_val_dataset.remove_columns("id")
         
         # Create fresh model and tokenizer for this fold
-        tokenizer, model = tokenizer_factory(), model_factory()
+        tokenizer = tokenizer_factory()
+        model = model_factory()
         
         # Setup output directory for this fold
         fold_output_dir = os.path.join(base_output_dir, f"fold_{fold}")
@@ -232,8 +324,8 @@ def train_stage_binary_cv(dataset: DatasetDict, tokenizer_factory, model_factory
     return trainers
 
 
-def train_stage_multiclass_cv(dataset: DatasetDict, tokenizer_factory, model_factory, base_output_dir: str, n_folds: int = 7) -> List[Trainer]:
-    """Train 7-fold cross-validation models for stage 2 multiclass classification"""
+def train_stage_enhanced_multiclass_cv(dataset: DatasetDict, tokenizer_factory, model_factory, base_output_dir: str, n_folds: int = 7) -> List[Trainer]:
+    """Train 7-fold cross-validation models for stage 2 enhanced multiclass classification"""
     train_dataset = dataset["train"]
     
     # Convert to pandas for stratified splitting
@@ -245,7 +337,7 @@ def train_stage_multiclass_cv(dataset: DatasetDict, tokenizer_factory, model_fac
     trainers = []
     
     for fold, (train_idx, val_idx) in enumerate(skf.split(train_df, train_df['label'])):
-        logger.info(f"Training multiclass stage fold {fold + 1}/{n_folds}")
+        logger.info(f"Training enhanced multiclass stage fold {fold + 1}/{n_folds}")
         
         # Split data for this fold
         fold_train_df = train_df.iloc[train_idx].reset_index(drop=True)
@@ -262,7 +354,8 @@ def train_stage_multiclass_cv(dataset: DatasetDict, tokenizer_factory, model_fac
             fold_val_dataset = fold_val_dataset.remove_columns("id")
         
         # Create fresh model and tokenizer for this fold
-        tokenizer, model = tokenizer_factory(), model_factory()
+        tokenizer = tokenizer_factory()
+        model = model_factory()
         
         # Setup output directory for this fold
         fold_output_dir = os.path.join(base_output_dir, f"fold_{fold}")
@@ -271,31 +364,25 @@ def train_stage_multiclass_cv(dataset: DatasetDict, tokenizer_factory, model_fac
         args = TrainingArguments(
             output_dir=fold_output_dir,
             overwrite_output_dir=True,
-            save_strategy="steps",
-            save_steps=200,
+            save_strategy="epoch",
             save_total_limit=2,
-            eval_strategy="steps",
-            eval_steps=200,
+            eval_strategy="epoch",
             logging_dir=fold_output_dir,
             logging_strategy="steps",
-            logging_steps=200,
+            logging_steps=50,
             report_to=None,
-        
             load_best_model_at_end=True,
             metric_for_best_model="eval_f1",
-        
+            greater_is_better=True,
             fp16=True,
-            learning_rate=3e-5,
+            learning_rate=4e-5,
             warmup_ratio=0.1,
             weight_decay=0.01,
-            label_smoothing_factor=0.1,
             lr_scheduler_type="linear",
-        
             gradient_accumulation_steps=2,
-            per_device_train_batch_size=8,
-            per_device_eval_batch_size=8,
-        
-            num_train_epochs=2
+            per_device_train_batch_size=16,
+            per_device_eval_batch_size=16,
+            num_train_epochs=3
         )
 
         def compute_metrics(p):
@@ -303,7 +390,7 @@ def train_stage_multiclass_cv(dataset: DatasetDict, tokenizer_factory, model_fac
             preds = np.argmax(preds, axis=1)
             acc = (preds == p.label_ids).astype(np.float32).mean().item()
             cm = confusion_matrix(p.label_ids, preds)
-            print(f"Multiclass fold {fold + 1} confusion matrix:\n", cm)
+            print(f"Enhanced multiclass fold {fold + 1} confusion matrix:\n", cm)
             return {"accuracy": acc, "f1": f1_score(p.label_ids, preds, average="micro")}
 
         early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=3)
@@ -323,7 +410,7 @@ def train_stage_multiclass_cv(dataset: DatasetDict, tokenizer_factory, model_fac
         trainer.save_model()
         trainers.append(trainer)
         
-        logger.info(f"Completed multiclass fold {fold + 1}/{n_folds}")
+        logger.info(f"Completed enhanced multiclass fold {fold + 1}/{n_folds}")
     
     return trainers
 
@@ -348,8 +435,11 @@ def predict_stage1_ensemble(trainers: List[Trainer], tokenizers: List, texts: Li
 
             with torch.no_grad():
                 outputs = model(**enc)
-                logits = outputs.logits.detach().cpu().numpy()
-                probs = torch.softmax(torch.tensor(logits), dim=-1).numpy()[:, 1]  # probability for class 1 (hate)
+                if isinstance(outputs, dict):
+                    logits = outputs['logits'].detach().cpu().numpy()
+                else:
+                    logits = outputs.logits.detach().cpu().numpy()
+                probs = torch.softmax(torch.tensor(logits), dim=-1).numpy()[:, 1]  # probability for class 1 (has severity)
                 fold_probs.append(probs)
         
         fold_probs = np.concatenate(fold_probs, axis=0)
@@ -380,7 +470,10 @@ def predict_stage2_ensemble(trainers: List[Trainer], tokenizers: List, texts: Li
 
             with torch.no_grad():
                 outputs = model(**enc)
-                logits = outputs.logits.detach().cpu().numpy()
+                if isinstance(outputs, dict):
+                    logits = outputs['logits'].detach().cpu().numpy()
+                else:
+                    logits = outputs.logits.detach().cpu().numpy()
                 preds = np.argmax(logits, axis=1)
                 fold_preds.append(preds)
         
@@ -391,8 +484,8 @@ def predict_stage2_ensemble(trainers: List[Trainer], tokenizers: List, texts: Li
     all_fold_preds = np.array(all_fold_preds)  # shape: (n_folds, n_samples)
     ensemble_preds = []
     
-    # Define priority order for subtask 1A: 0 > 5 > 4 > 3 > 2 > 1
-    priority_order = {0: 6, 5: 5, 3: 4, 4: 3, 1: 2, 2: 1}  # Higher number = higher priority
+    # Define priority order for severity: 0 (Little to None) > 2 (Severe) > 1 (Mild)
+    priority_order = {0: 3, 2: 2, 1: 1}  # Higher number = higher priority
     
     for i in range(all_fold_preds.shape[1]):
         # Get predictions for sample i across all folds
@@ -431,136 +524,136 @@ def predict_stage2_ensemble(trainers: List[Trainer], tokenizers: List, texts: Li
 
 def route_indices_by_stage1(pred_probs: np.ndarray, ids: List, threshold: float = 0.5):
     """Route samples based on stage 1 predictions"""
-    # pred_probs is probability for class 1 (hate)
-    is_hate = pred_probs >= threshold
-    hate_idx = np.where(is_hate)[0]
-    none_idx = np.where(~is_hate)[0]
-    return hate_idx, none_idx
+    # pred_probs is probability for class 1 (has severity)
+    has_severity = pred_probs >= threshold
+    severity_idx = np.where(has_severity)[0]
+    none_idx = np.where(~has_severity)[0]
+    return severity_idx, none_idx
 
 
-def run_cascade_cv(threshold: float = 0.3):
-    """Run the cascade approach with 7-fold cross-validation for subtask 1A"""
-    logger.info("Starting 7-Fold CV Cascade for Subtask 1A")
+def run_enhanced_cascade_cv(threshold: float = 0.3):
+    """Run the enhanced cascade approach with 7-fold cross-validation"""
+    logger.info("Starting Enhanced 7-Fold CV Cascade for Subtask 1C Severity")
     
-    # Stage 1: Binary classification (None vs Hate) with 7-fold CV
+    # Stage 1: Binary classification (Little to None vs Has severity) with 7-fold CV
     logger.info("=== STAGE 1: Binary Classification with 7-Fold CV ===")
-    logger.info("Loading 1A (binary) datasets...")
-    ds1 = load_1a_binary_datasets()
+    logger.info("Loading 1C (binary) datasets...")
+    ds1 = load_1c_binary_datasets()
     
     # Factory functions for creating fresh models/tokenizers for each fold
     def binary_tokenizer_factory():
-        tokenizer, _ = build_tokenizer_and_model(MODEL_NAME_STAGE1, num_labels=2)
+        tokenizer, _ = build_standard_tokenizer_and_model(MODEL_NAME_STAGE1, num_labels=2)
         return tokenizer
     
     def binary_model_factory():
-        _, model = build_tokenizer_and_model(MODEL_NAME_STAGE1, num_labels=2)
+        _, model = build_standard_tokenizer_and_model(MODEL_NAME_STAGE1, num_labels=2)
         return model
     
     # Get a tokenizer for preprocessing (will be used for all folds)
-    tok1, _ = build_tokenizer_and_model(MODEL_NAME_STAGE1, num_labels=2)
+    tok1, _ = build_standard_tokenizer_and_model(MODEL_NAME_STAGE1, num_labels=2)
     ds1 = preprocess_dataset(ds1, tok1, MAX_SEQ_LEN)
     
     # Train 7-fold CV models for stage 1
     logger.info("Training 7-fold CV models for stage 1 binary classification...")
     cv_trainers_binary = train_stage_binary_cv(ds1, binary_tokenizer_factory, binary_model_factory, 
-                                             base_output_dir="./cascade_stage1_1A_binary_cv", n_folds=7)
+                                             base_output_dir="./enhanced_cascade_stage1_1C_severity_binary_cv", n_folds=7)
     
     # Create tokenizers for each fold for inference
     cv_tokenizers_binary = [binary_tokenizer_factory() for _ in range(7)]
 
-    # Stage 2: Multiclass classification (All 6 classes) with 7-fold CV
-    logger.info("=== STAGE 2: Multiclass Classification with 7-Fold CV ===")
-    logger.info("Loading 1A (multiclass) datasets...")
-    ds2 = load_1a_multiclass_datasets()
+    # Stage 2: Enhanced multiclass classification (All 3 severity classes) with 7-fold CV
+    logger.info("=== STAGE 2: Enhanced Multiclass Classification with 7-Fold CV ===")
+    logger.info("Loading 1C (multiclass) datasets...")
+    ds2 = load_1c_multiclass_datasets()
     
-    # Factory functions for multiclass models
-    def multiclass_tokenizer_factory():
-        tokenizer, _ = build_tokenizer_and_model(MODEL_NAME_STAGE2, num_labels=6)
+    # Factory functions for enhanced models
+    def enhanced_tokenizer_factory():
+        tokenizer, _ = build_enhanced_tokenizer_and_model(MODEL_NAME_STAGE2, num_labels=3)
         return tokenizer
     
-    def multiclass_model_factory():
-        _, model = build_tokenizer_and_model(MODEL_NAME_STAGE2, num_labels=6)
+    def enhanced_model_factory():
+        _, model = build_enhanced_tokenizer_and_model(MODEL_NAME_STAGE2, num_labels=3)
         return model
     
     # Get a tokenizer for preprocessing
-    tok2, _ = build_tokenizer_and_model(MODEL_NAME_STAGE2, num_labels=6)
+    tok2, _ = build_enhanced_tokenizer_and_model(MODEL_NAME_STAGE2, num_labels=3)
     ds2 = preprocess_dataset(ds2, tok2, MAX_SEQ_LEN)
     
-    # Train 7-fold CV models for stage 2
-    logger.info("Training 7-fold CV models for stage 2 multiclass classification...")
-    cv_trainers_multiclass = train_stage_multiclass_cv(ds2, multiclass_tokenizer_factory, multiclass_model_factory,
-                                                     base_output_dir="./cascade_stage2_1A_multiclass_cv", n_folds=7)
+    # Train 7-fold CV enhanced models for stage 2
+    logger.info("Training 7-fold CV models for stage 2 enhanced multiclass classification...")
+    cv_trainers_enhanced = train_stage_enhanced_multiclass_cv(ds2, enhanced_tokenizer_factory, enhanced_model_factory,
+                                                            base_output_dir="./enhanced_cascade_stage2_1C_severity_multiclass_cv", n_folds=7)
     
     # Create tokenizers for each fold for inference
-    cv_tokenizers_multiclass = [multiclass_tokenizer_factory() for _ in range(7)]
+    cv_tokenizers_enhanced = [enhanced_tokenizer_factory() for _ in range(7)]
 
-    # Cascaded inference on 1A dev and test
-    id2l_1A = {v: k for k, v in L2ID_1A.items()}
+    # Cascaded inference on 1C dev and test
+    id2severity = {v: k for k, v in SEVERITY_L2ID.items()}
 
     # Dev routing with ensemble prediction
     logger.info("=== INFERENCE ON DEV SET ===")
-    dev_df_raw = pd.read_csv(DEV_1A, sep="\t")
+    dev_df_raw = pd.read_csv(DEV_1C, sep="\t")
     dev_ids = dev_df_raw["id"].tolist()
     dev_texts = dev_df_raw["text"].astype(str).tolist()
     
     # Stage 1 ensemble predictions
     logger.info("Performing ensemble prediction for stage 1 on dev set...")
     dev_probs = predict_stage1_ensemble(cv_trainers_binary, cv_tokenizers_binary, dev_texts)
-    hate_idx, none_idx = route_indices_by_stage1(dev_probs, dev_ids, threshold)
+    severity_idx, none_idx = route_indices_by_stage1(dev_probs, dev_ids, threshold)
     
-    logger.info(f"Stage 1 routing: {len(none_idx)} samples -> None, {len(hate_idx)} samples -> Stage 2")
+    logger.info(f"Stage 1 routing: {len(none_idx)} samples -> Little to None, {len(severity_idx)} samples -> Stage 2")
 
     dev_final = np.zeros(len(dev_texts), dtype=int)
-    dev_final[none_idx] = 0  # Assign None directly
+    dev_final[none_idx] = 0  # Assign Little to None directly
     
-    if len(hate_idx) > 0:
-        # Stage 2 ensemble predictions for hate samples
+    if len(severity_idx) > 0:
+        # Stage 2 ensemble predictions for severity samples
         logger.info("Performing ensemble prediction for stage 2 on dev set...")
-        sub_preds = predict_stage2_ensemble(cv_trainers_multiclass, cv_tokenizers_multiclass, 
-                                          [dev_texts[i] for i in hate_idx])
-        dev_final[hate_idx] = sub_preds
+        sub_preds = predict_stage2_ensemble(cv_trainers_enhanced, cv_tokenizers_enhanced, 
+                                          [dev_texts[i] for i in severity_idx])
+        dev_final[severity_idx] = sub_preds
 
     # Save dev predictions
-    dev_out = os.path.join("./cascade_cv_outputs", "subtask_1A_dev_cascade_cv.tsv")
+    dev_out = os.path.join("./enhanced_cascade_cv_outputs", "subtask_1C_severity_dev_enhanced_cascade_cv.tsv")
     os.makedirs(os.path.dirname(dev_out), exist_ok=True)
     with open(dev_out, "w", encoding="utf-8") as w:
-        w.write("id\tlabel\tmodel\n")
+        w.write("id\thate_severity\tmodel\n")
         for i, pid in enumerate(dev_ids):
-            w.write(f"{pid}\t{id2l_1A[int(dev_final[i])]}\tcascade_cv(banglabert->banglabert)\n")
-    logger.info(f"Saved cascaded CV dev predictions to {dev_out}")
+            w.write(f"{pid}\t{id2severity[int(dev_final[i])]}\tenhanced_cascade_cv(banglabert->enhanced_banglabert)\n")
+    logger.info(f"Saved enhanced cascaded CV dev predictions to {dev_out}")
 
     # Test routing with ensemble prediction
     logger.info("=== INFERENCE ON TEST SET ===")
-    test_df_raw = pd.read_csv(TEST_1A, sep="\t")
+    test_df_raw = pd.read_csv(TEST_1C, sep="\t")
     test_ids = test_df_raw["id"].tolist()
     test_texts = test_df_raw["text"].astype(str).tolist()
     
     # Stage 1 ensemble predictions
     logger.info("Performing ensemble prediction for stage 1 on test set...")
     test_probs = predict_stage1_ensemble(cv_trainers_binary, cv_tokenizers_binary, test_texts)
-    hate_idx_t, none_idx_t = route_indices_by_stage1(test_probs, test_ids, threshold)
+    severity_idx_t, none_idx_t = route_indices_by_stage1(test_probs, test_ids, threshold)
     
-    logger.info(f"Stage 1 routing: {len(none_idx_t)} samples -> None, {len(hate_idx_t)} samples -> Stage 2")
+    logger.info(f"Stage 1 routing: {len(none_idx_t)} samples -> Little to None, {len(severity_idx_t)} samples -> Stage 2")
 
     test_final = np.zeros(len(test_texts), dtype=int)
-    test_final[none_idx_t] = 0  # Assign None directly
+    test_final[none_idx_t] = 0  # Assign Little to None directly
     
-    if len(hate_idx_t) > 0:
-        # Stage 2 ensemble predictions for hate samples
+    if len(severity_idx_t) > 0:
+        # Stage 2 ensemble predictions for severity samples
         logger.info("Performing ensemble prediction for stage 2 on test set...")
-        sub_preds_t = predict_stage2_ensemble(cv_trainers_multiclass, cv_tokenizers_multiclass,
-                                            [test_texts[i] for i in hate_idx_t])
-        test_final[hate_idx_t] = sub_preds_t
+        sub_preds_t = predict_stage2_ensemble(cv_trainers_enhanced, cv_tokenizers_enhanced,
+                                            [test_texts[i] for i in severity_idx_t])
+        test_final[severity_idx_t] = sub_preds_t
 
-    test_out = os.path.join("./cascade_cv_outputs", "subtask_1A_test_cascade_cv.tsv")
+    test_out = os.path.join("./enhanced_cascade_cv_outputs", "subtask_1C_severity_test_enhanced_cascade_cv.tsv")
     with open(test_out, "w", encoding="utf-8") as w:
-        w.write("id\tlabel\tmodel\n")
+        w.write("id\thate_severity\tmodel\n")
         for i, pid in enumerate(test_ids):
-            w.write(f"{pid}\t{id2l_1A[int(test_final[i])]}\tcascade_cv(banglabert->banglabert)\n")
-    logger.info(f"Saved cascaded CV test predictions to {test_out}")
+            w.write(f"{pid}\t{id2severity[int(test_final[i])]}\tenhanced_cascade_cv(banglabert->enhanced_banglabert)\n")
+    logger.info(f"Saved enhanced cascaded CV test predictions to {test_out}")
     
-    logger.info("7-fold CV cascade completed successfully!")
+    logger.info("Enhanced 7-fold CV cascade completed successfully!")
 
 
 if __name__ == "__main__":
-    run_cascade_cv(threshold=0.5) 
+    run_enhanced_cascade_cv(threshold=0.5) 
