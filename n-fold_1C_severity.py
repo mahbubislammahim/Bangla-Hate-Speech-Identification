@@ -485,7 +485,7 @@ def predict_stage2_ensemble(trainers: List[Trainer], tokenizers: List, texts: Li
     ensemble_preds = []
     
     # Define priority order for severity: 0 (Little to None) > 2 (Severe) > 1 (Mild)
-    priority_order = {0: 3, 2: 2, 1: 1}  # Higher number = higher priority
+    priority_order = {0: 3, 1: 2, 2: 1}  # Higher number = higher priority
     
     for i in range(all_fold_preds.shape[1]):
         # Get predictions for sample i across all folds

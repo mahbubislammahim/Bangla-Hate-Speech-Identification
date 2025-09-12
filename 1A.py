@@ -112,10 +112,6 @@ print(f"   Test samples: {len(test_df):,}")
 
 # Show class distribution
 label_counts = train_df['label'].value_counts().sort_index()
-weights = 1.0 / label_counts
-weights = weights / weights.sum() * len(label_counts)
-class_weights = torch.tensor(weights.values, dtype=torch.float).to("cuda")
-print(class_weights)
 
 id2l = {v: k for k, v in l2id.items()}
 print("\n📊 Class Distribution:")
@@ -142,7 +138,7 @@ print("✅ Data loaded successfully!")
 class EnhancedBanglaBERT(nn.Module):
     """BanglaBERT with enhanced classification head"""
     
-    def __init__(self, model_name, num_labels, hidden_dropout=0.2, use_attention_pooling=True, class_weights=None):
+    def __init__(self, model_name, num_labels, hidden_dropout=0.2, use_attention_pooling=True):
         super().__init__()
         self.num_labels = num_labels
         self.use_attention_pooling = use_attention_pooling
@@ -156,8 +152,6 @@ class EnhancedBanglaBERT(nn.Module):
         self.config.label2id = {f"LABEL_{i}": i for i in range(num_labels)}
         self.config.id2label = {i: f"LABEL_{i}" for i in range(num_labels)}
         
-        if class_weights is not None:
-            self.class_weights = class_weights
         
         hidden_size = self.bert.config.hidden_size
         
@@ -211,10 +205,7 @@ class EnhancedBanglaBERT(nn.Module):
         # Calculate loss if labels provided
         loss = None
         if labels is not None:
-            weights = getattr(self, 'class_weights', None)
-            if weights is None:
-                weights = torch.ones(self.num_labels).to(logits.device)
-            loss_fn = nn.CrossEntropyLoss(weight=weights)
+            loss_fn = nn.CrossEntropyLoss()
             loss = loss_fn(logits.view(-1, self.num_labels), labels.view(-1))
         
         # Return only necessary outputs to avoid None values
