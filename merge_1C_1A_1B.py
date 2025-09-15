@@ -14,7 +14,7 @@ def read_tsv(path: str, expected_cols):
 def main():
     pred_1a = "./results/subtask_1A.tsv"             
     pred_1b = "./results/subtask_1B.tsv"              
-    pred_sev = "subtask_1C_severity.tsv"    
+    pred_sev = "./results/subtask_1C_severe.tsv"    
     output_path = "./results/subtask_1C.tsv"         
 
     for path in [pred_1a, pred_1b, pred_sev]:
