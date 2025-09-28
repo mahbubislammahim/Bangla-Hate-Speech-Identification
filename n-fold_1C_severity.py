@@ -1,5 +1,5 @@
 # =============================================================================
-# 7-Fold Cross-Validation Cascade Implementation for Subtask 1C Severity
+# 9-Fold Cross-Validation Cascade Implementation for Subtask 1C Severity
 # =============================================================================
 
 import logging
@@ -174,7 +174,7 @@ def preprocess_dataset(ds: DatasetDict, tokenizer, max_len: int) -> DatasetDict:
 
 
 def train_stage_binary_cv(dataset: DatasetDict, tokenizer_factory, model_factory, base_output_dir: str, n_folds: int = 9) -> List[Trainer]:
-    """Train 7-fold cross-validation models for stage 1 binary classification"""
+    """Train 9-fold cross-validation models for stage 1 binary classification"""
     train_dataset = dataset["train"]
     
     # Convert to pandas for stratified splitting
@@ -265,7 +265,7 @@ def train_stage_binary_cv(dataset: DatasetDict, tokenizer_factory, model_factory
 
 
 def train_stage_multiclass_cv(dataset: DatasetDict, tokenizer_factory, model_factory, base_output_dir: str, n_folds: int = 9) -> List[Trainer]:
-    """Train 7-fold cross-validation models for stage 2 multiclass classification"""
+    """Train 9-fold cross-validation models for stage 2 multiclass classification"""
     train_dataset = dataset["train"]
     
     # Convert to pandas for stratified splitting
@@ -479,11 +479,11 @@ def route_indices_by_stage1(pred_probs: np.ndarray, ids: List, threshold: float 
 
 
 def run_cascade_cv(threshold: float = 0.3):
-    """Run the cascade approach with 7-fold cross-validation"""
-    logger.info("Starting 7-Fold CV Cascade for Subtask 1C Severity")
+    """Run the cascade approach with 9-fold cross-validation"""
+    logger.info("Starting 9-Fold CV Cascade for Subtask 1C Severity")
     
-    # Stage 1: Binary classification (Little to None vs Has severity) with 7-fold CV
-    logger.info("=== STAGE 1: Binary Classification with 7-Fold CV ===")
+    # Stage 1: Binary classification (Little to None vs Has severity) with 9-fold CV
+    logger.info("=== STAGE 1: Binary Classification with 9-Fold CV ===")
     logger.info("Loading 1C (binary) datasets...")
     ds1 = load_1c_binary_datasets()
     
@@ -500,16 +500,16 @@ def run_cascade_cv(threshold: float = 0.3):
     tok1, _ = build_standard_tokenizer_and_model(MODEL_NAME_STAGE1, num_labels=2)
     ds1 = preprocess_dataset(ds1, tok1, MAX_SEQ_LEN)
     
-    # Train 7-fold CV models for stage 1
-    logger.info("Training 7-fold CV models for stage 1 binary classification...")
+    # Train 9-fold CV models for stage 1
+    logger.info("Training 9-fold CV models for stage 1 binary classification...")
     cv_trainers_binary = train_stage_binary_cv(ds1, binary_tokenizer_factory, binary_model_factory, 
-                                             base_output_dir="./cascade_stage1_1C_severity_binary_cv", n_folds=7)
+                                             base_output_dir="./cascade_stage1_1C_severity_binary_cv", n_folds=9)
     
     # Create tokenizers for each fold for inference
-    cv_tokenizers_binary = [binary_tokenizer_factory() for _ in range(7)]
+    cv_tokenizers_binary = [binary_tokenizer_factory() for _ in range(9)]
 
-    # Stage 2: Multiclass classification (All 3 severity classes) with 7-fold CV
-    logger.info("=== STAGE 2: Multiclass Classification with 7-Fold CV ===")
+    # Stage 2: Multiclass classification (All 3 severity classes) with 9-fold CV
+    logger.info("=== STAGE 2: Multiclass Classification with 9-Fold CV ===")
     logger.info("Loading 1C (multiclass) datasets...")
     ds2 = load_1c_multiclass_datasets()
     
@@ -526,13 +526,13 @@ def run_cascade_cv(threshold: float = 0.3):
     tok2, _ = build_standard_tokenizer_and_model_stage2(MODEL_NAME_STAGE2, num_labels=3)
     ds2 = preprocess_dataset(ds2, tok2, MAX_SEQ_LEN)
     
-    # Train 7-fold CV models for stage 2
-    logger.info("Training 7-fold CV models for stage 2 multiclass classification...")
+    # Train 9-fold CV models for stage 2
+    logger.info("Training 9-fold CV models for stage 2 multiclass classification...")
     cv_trainers_multiclass = train_stage_multiclass_cv(ds2, multiclass_tokenizer_factory, multiclass_model_factory,
-                                                      base_output_dir="./cascade_stage2_1C_severity_multiclass_cv", n_folds=7)
+                                                      base_output_dir="./cascade_stage2_1C_severity_multiclass_cv", n_folds=9)
     
     # Create tokenizers for each fold for inference
-    cv_tokenizers_multiclass = [multiclass_tokenizer_factory() for _ in range(7)]
+    cv_tokenizers_multiclass = [multiclass_tokenizer_factory() for _ in range(9)]
 
     # Cascaded inference on 1C dev and test
     id2severity = {v: k for k, v in SEVERITY_L2ID.items()}
@@ -599,7 +599,7 @@ def run_cascade_cv(threshold: float = 0.3):
             w.write(f"{pid}\t{id2severity[int(test_final[i])]}\tcascade_cv(banglabert->banglabert)\n")
     logger.info(f"Saved cascaded CV test predictions to {test_out}")
     
-    logger.info("7-fold CV cascade completed successfully!")
+    logger.info("9-fold CV cascade completed successfully!")
 
 
 if __name__ == "__main__":
