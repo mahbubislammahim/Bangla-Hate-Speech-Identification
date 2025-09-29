@@ -21,6 +21,8 @@ regex==2022.10.31
 requests==2.28.2
 scikit-learn==0.24.1
 scipy==1.6.0
+seaborn
+matplotlib
 six==1.15.0
 # Hugging Face Transformers and related dependencies
 transformers>=4.21.0
